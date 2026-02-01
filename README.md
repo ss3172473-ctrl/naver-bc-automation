@@ -37,13 +37,19 @@ node --version
 # v18.x.x 이상이 나오면 성공!
 ```
 
-### 2. OpenAI API 키 발급
+### 2. AI API 키 발급 (OpenAI 또는 Gemini 중 택1)
 
+**🅰️ OpenAI 사용 시 (유료)**
 1. [OpenAI Platform](https://platform.openai.com/api-keys) 접속
-2. 구글/마이크로소프트 계정으로 로그인 (또는 회원가입)
-3. 좌측 메뉴에서 **API Keys** 클릭
-4. **"Create new secret key"** 버튼 클릭
-5. 생성된 키 복사 (sk-xxx... 형태)
+2. 구글/마이크로소프트 계정으로 로그인
+3. **"Create new secret key"** 클릭
+4. 생성된 키 복사 (sk-xxx... 형태)
+
+**🅱️ Gemini 사용 시 (무료! ⭐)**
+1. [Google AI Studio](https://aistudio.google.com/app/apikey) 접속
+2. 구글 계정으로 로그인
+3. **"API 키 만들기"** 클릭
+4. 생성된 키 복사 (AIza... 형태)
 
 > ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
 
@@ -107,8 +113,14 @@ cp .env.example .env
 메모장 또는 VS Code로 `.env` 파일을 열고 아래 내용을 입력:
 
 ```env
-# OpenAI API 키 (위에서 발급받은 키)
+# AI 선택 (openai 또는 gemini)
+AI_PROVIDER=openai
+
+# OpenAI 사용 시 (AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
+
+# Gemini 사용 시 (AI_PROVIDER=gemini) - 무료!
+GEMINI_API_KEY=AIza여기에_발급받은_키_붙여넣기
 
 # 네이버 블로그 ID
 NAVER_BLOG_ID=내_블로그_아이디
@@ -116,6 +128,8 @@ NAVER_BLOG_ID=내_블로그_아이디
 # 데이터베이스 (수정 불필요)
 DATABASE_URL="file:./prisma/dev.db"
 ```
+
+> 💡 **Gemini 무료 사용 팁**: `AI_PROVIDER=gemini`로 설정하면 무료로 사용 가능!
 
 ---
 

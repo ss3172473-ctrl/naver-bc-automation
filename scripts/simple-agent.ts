@@ -11,12 +11,25 @@ import { PrismaClient } from "@prisma/client";
 import * as path from "path";
 import * as fs from "fs";
 import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// AI Provider 설정 (openai 또는 gemini)
+const AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
+
+// OpenAI 초기화
+const openai = AI_PROVIDER === "openai" 
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) 
+  : null;
+
+// Gemini 초기화
+const gemini = AI_PROVIDER === "gemini" 
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
+  : null;
 
 const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
 const TEMP_PATH = path.join(process.cwd(), "temp_images");
@@ -317,10 +330,48 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 }
 
 // ============================================
+// AI 공통 호출 함수 (OpenAI / Gemini)
+// ============================================
+async function generateWithAI(systemPrompt: string, userPrompt: string): Promise<string> {
+  if (AI_PROVIDER === "gemini" && gemini) {
+    // Gemini 사용
+    const model = gemini.getGenerativeModel({ 
+      model: "gemini-2.5-flash-preview-05-20",
+      generationConfig: {
+        temperature: 0.75,
+        maxOutputTokens: 4000,
+      }
+    });
+    
+    // Gemini는 system prompt를 user prompt에 합쳐서 전달
+    const combinedPrompt = `[시스템 지시사항]\n${systemPrompt}\n\n[사용자 요청]\n${userPrompt}`;
+    const result = await model.generateContent(combinedPrompt);
+    return result.response.text();
+    
+  } else if (openai) {
+    // OpenAI 사용
+    const response = await openai.chat.completions.create({
+      model: "gpt-5.2",  // GPT-5.2 모델 사용
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0.75,
+      max_completion_tokens: 4000,
+    });
+    return response.choices[0]?.message?.content || "";
+    
+  } else {
+    throw new Error("AI Provider가 설정되지 않았습니다. .env 파일을 확인하세요.");
+  }
+}
+
+// ============================================
 // STEP 2: LLM으로 SEO 최적화 글 생성 (긴 버전)
 // ============================================
 async function step2_generatePost(product: ProductInfo, brandLink: string): Promise<{ title: string; sections: string[]; hashtags: string[] }> {
   console.log("\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판)");
+  console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
   
   const imageCount = Math.max(product.imagePaths.length, 8);  // 최소 8섹션
   
@@ -340,19 +391,14 @@ async function step2_generatePost(product: ProductInfo, brandLink: string): Prom
   ];
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-5.2",  // GPT-5.2 모델 사용
-    messages: [{
-      role: "system",
-      content: `당신은 인기 네이버 블로거입니다. 
+  const systemPrompt = `당신은 인기 네이버 블로거입니다. 
 - 친근하고 솔직한 ~요체 사용 (했어요, 같아요, 더라고요, 거든요)
 - 상품을 정확히 이해하고 실제 사용한 것처럼 생생하게 작성
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
-- 과장 없이 신뢰감 있게 작성`
-    }, {
-      role: "user",
-      content: `다음 상품의 상세 블로그 리뷰를 작성해주세요.
+- 과장 없이 신뢰감 있게 작성`;
+
+  const userPrompt = `다음 상품의 상세 블로그 리뷰를 작성해주세요.
 
 ## 상품 정보
 - 상품명: ${product.name}
@@ -422,13 +468,9 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
     "📦 소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n"
   ],
   "hashtags": ["키워드1", "키워드2", ...]
-}`
-    }],
-    temperature: 0.75,  // 적당한 변화
-    max_completion_tokens: 4000,   // GPT-5.2는 max_completion_tokens 사용
-  });
+}`;
   
-  const text = response.choices[0]?.message?.content || "";
+  const text = await generateWithAI(systemPrompt, userPrompt);
   const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
   
   // 마지막에 필수 문구와 구매링크 추가 (링크 프리뷰가 문장을 끊지 않도록 순서 변경)
