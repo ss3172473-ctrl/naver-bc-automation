@@ -9,6 +9,9 @@ node_modules/
 # Database
 prisma/dev.db
 prisma/dev.db-journal
+prisma/prisma/
+*.db
+*.db-journal
 
 # Playwright 세션 (로그인 정보)
 playwright/storage/
