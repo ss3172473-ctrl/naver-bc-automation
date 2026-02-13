@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import path from "path";
-import { spawn } from "child_process";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+
+export const runtime = "nodejs";
 
 export async function POST(
   request: NextRequest,
@@ -33,22 +33,20 @@ export async function POST(
     );
   }
 
-  const scriptPath = path.join(process.cwd(), "scripts", "scrape-job.ts");
-  const child = spawn(
-    "npx",
-    ["ts-node", "--project", "tsconfig.scripts.json", scriptPath, id],
-    {
-      cwd: process.cwd(),
-      detached: true,
-      stdio: "ignore",
-      shell: true,
-    }
-  );
-
-  child.unref();
+  // Vercel(Serverless)에서는 Playwright 스크랩을 직접 실행하면 시간 제한/중단 문제가 생깁니다.
+  // 실제 실행은 별도 Worker가 QUEUED 작업을 가져가 처리합니다.
+  await prisma.scrapeJob.update({
+    where: { id },
+    data: {
+      status: "QUEUED",
+      startedAt: null,
+      completedAt: null,
+      errorMessage: null,
+    },
+  });
 
   return NextResponse.json({
     success: true,
-    message: "작업 실행을 시작했습니다.",
+    message: "작업을 QUEUED로 등록했습니다. Worker가 순서대로 실행합니다.",
   });
 }

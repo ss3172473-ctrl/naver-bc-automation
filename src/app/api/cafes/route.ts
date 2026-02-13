@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { fetchJoinedCafes } from "@/lib/naver/cafes";
-import { getCafeSessionStatus, NAVER_CAFE_SESSION_FILE } from "@/lib/naver/session";
+import { prisma } from "@/lib/db";
+
+export const runtime = "nodejs";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -12,23 +13,13 @@ export async function GET() {
     );
   }
 
-  const status = getCafeSessionStatus();
-  if (!status.hasSession) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: "카페 세션이 없습니다. 먼저 `npm run cafe:login`을 실행하세요.",
-        data: {
-          hasSession: false,
-          sessionPath: NAVER_CAFE_SESSION_FILE,
-        },
-      },
-      { status: 400 }
-    );
-  }
-
   try {
-    const cafes = await fetchJoinedCafes();
+    // Vercel에서는 Playwright를 실행하지 않습니다.
+    // 가입 카페 리스트는 Worker가 주기적으로 갱신하여 DB에 저장합니다.
+    const cafes = await prisma.cafeMembership.findMany({
+      orderBy: [{ name: "asc" }],
+      take: 500,
+    });
     return NextResponse.json({ success: true, data: cafes });
   } catch (error) {
     console.error("가입 카페 조회 실패:", error);

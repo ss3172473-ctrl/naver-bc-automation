@@ -7,6 +7,8 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Page, Frame } from "playwright";
 import { contentHash } from "../src/lib/scrape/hash";
 import { sendRowsToGoogleSheet } from "../src/lib/sheets";
+import { decryptString } from "../src/lib/crypto";
+import { telegramSendMessage } from "../src/lib/telegram";
 
 chromium.use(StealthPlugin());
 
@@ -48,6 +50,37 @@ const SESSION_FILE =
   process.env.NAVER_CAFE_SESSION_FILE ||
   path.join(process.cwd(), "playwright", "storage", "naver-cafe-session.json");
 const OUTPUT_DIR = path.join(process.cwd(), "outputs", "scrape-jobs");
+const STORAGE_STATE_KEY = "naverCafeStorageStateEnc";
+
+type StorageStateObject = { cookies: any[]; origins: any[] };
+
+function isStorageStateObject(value: unknown): value is StorageStateObject {
+  if (!value || typeof value !== "object") return false;
+  const v = value as any;
+  return Array.isArray(v.cookies) && Array.isArray(v.origins);
+}
+
+async function loadStorageState(): Promise<string | StorageStateObject> {
+  // Local/dev: use the file-based storageState if it exists.
+  if (SESSION_FILE && fs.existsSync(SESSION_FILE)) {
+    return SESSION_FILE;
+  }
+
+  // Cloud/Worker: read encrypted storageState from DB Setting.
+  const secret = process.env.APP_AUTH_SECRET || "";
+  const row = await prisma.setting.findUnique({ where: { key: STORAGE_STATE_KEY } });
+  if (!row?.value) {
+    throw new Error(
+      "네이버 카페 세션(storageState)이 없습니다. 대시보드에서 세션을 업로드하세요."
+    );
+  }
+  const json = decryptString(row.value, secret);
+  const parsed = JSON.parse(json);
+  if (!isStorageStateObject(parsed)) {
+    throw new Error("storageState JSON 포맷이 올바르지 않습니다. (cookies/origins 필요)");
+  }
+  return parsed;
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -449,10 +482,7 @@ function writeCsv(jobId: string, posts: ParsedPost[]): string {
 async function run(jobId: string) {
   const job = await prisma.scrapeJob.findUnique({ where: { id: jobId } });
   if (!job) throw new Error("작업이 존재하지 않습니다.");
-
-  if (!fs.existsSync(SESSION_FILE)) {
-    throw new Error("카페 로그인 세션 파일이 없습니다. npm run cafe:login을 먼저 실행하세요.");
-  }
+  const storageState = await loadStorageState();
 
   await prisma.scrapeJob.update({
     where: { id: jobId },
@@ -467,7 +497,7 @@ async function run(jobId: string) {
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
-    storageState: SESSION_FILE,
+    storageState,
     locale: "ko-KR",
     viewport: { width: 1366, height: 900 },
     userAgent:
@@ -521,8 +551,10 @@ async function run(jobId: string) {
       if (collected.length >= job.maxPosts) break;
     }
   } finally {
-    // Persist refreshed cookies set during scraping (prevents future redirects to login/join walls).
-    await context.storageState({ path: SESSION_FILE }).catch(() => undefined);
+    // Persist refreshed cookies set during scraping (dev/local file-mode only).
+    if (typeof storageState === "string") {
+      await context.storageState({ path: storageState }).catch(() => undefined);
+    }
     await context.close();
     await browser.close();
   }
@@ -649,6 +681,16 @@ async function run(jobId: string) {
       completedAt: new Date(),
     },
   });
+
+  if (job.notifyChatId) {
+    await telegramSendMessage(
+      job.notifyChatId,
+      `스크랩 완료\njobId=${jobId}\n저장=${savedCount}개\nSheets 전송=${syncedCount}개`,
+      { disableWebPagePreview: true }
+    ).catch((error) => {
+      console.error("텔레그램 알림 실패:", error);
+    });
+  }
 }
 
 async function main() {
@@ -669,6 +711,15 @@ async function main() {
         completedAt: new Date(),
       },
     }).catch(() => undefined);
+
+    const job = await prisma.scrapeJob.findUnique({ where: { id: jobId } }).catch(() => null);
+    if (job?.notifyChatId) {
+      await telegramSendMessage(
+        job.notifyChatId,
+        `스크랩 실패\njobId=${jobId}\n에러=${message}`,
+        { disableWebPagePreview: true }
+      ).catch((err) => console.error("텔레그램 실패 알림 실패:", err));
+    }
 
     throw error;
   } finally {

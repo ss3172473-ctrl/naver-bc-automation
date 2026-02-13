@@ -46,3 +46,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# TS build info
+*.tsbuildinfo

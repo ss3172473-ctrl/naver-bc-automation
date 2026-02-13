@@ -14,6 +14,7 @@
     "publish": "npx ts-node --project tsconfig.scripts.json scripts/simple-agent.ts",
     "db:studio": "npx prisma studio",
     "db:push": "npx prisma db push",
+    "cafes:refresh": "npx ts-node --project tsconfig.scripts.json scripts/refresh-cafes.ts",
     "scrape:job": "npx ts-node --project tsconfig.scripts.json scripts/scrape-job.ts",
     "worker": "npx ts-node --project tsconfig.scripts.json scripts/queue-worker.ts"
   },

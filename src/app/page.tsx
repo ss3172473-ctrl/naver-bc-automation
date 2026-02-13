@@ -41,6 +41,8 @@ function parseJsonList(input: string | null): string[] {
 export default function DashboardPage() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [sessionLoading, setSessionLoading] = useState(true);
+  const [storageStateText, setStorageStateText] = useState("");
+  const [savingSession, setSavingSession] = useState(false);
 
   const [cafes, setCafes] = useState<JoinedCafe[]>([]);
   const [cafesLoading, setCafesLoading] = useState(false);
@@ -78,6 +80,43 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const saveSession = async () => {
+    if (!storageStateText.trim()) {
+      alert("storageState(JSON) 내용을 붙여 넣으세요.");
+      return;
+    }
+    try {
+      setSavingSession(true);
+      const res = await fetch("/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storageState: storageStateText }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        alert(data.error || "세션 저장 실패");
+        return;
+      }
+      setStorageStateText("");
+      await fetchSession();
+      alert("세션 저장 완료");
+    } finally {
+      setSavingSession(false);
+    }
+  };
+
+  const deleteSession = async () => {
+    if (!confirm("저장된 세션을 삭제할까요?")) return;
+    const res = await fetch("/api/session", { method: "DELETE" });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      alert(data.error || "세션 삭제 실패");
+      return;
+    }
+    await fetchSession();
+    alert("세션 삭제 완료");
+  };
+
   const fetchJobs = useCallback(async () => {
     try {
       setJobsLoading(true);
@@ -106,8 +145,12 @@ export default function DashboardPage() {
         setCafesError(data.error || "가입 카페 조회 실패");
         return;
       }
-      setCafes(data.data);
+      const list = Array.isArray(data.data) ? data.data : [];
+      setCafes(list);
       setSelectedCafeIds([]);
+      if (list.length === 0) {
+        setCafesError("가입 카페 목록이 비어있습니다. Worker가 갱신하기 전일 수 있습니다.");
+      }
     } finally {
       setCafesLoading(false);
     }
@@ -202,8 +245,35 @@ export default function DashboardPage() {
               ? "세션 확인 중..."
               : session?.hasSession
                 ? `세션 사용 가능 (${session.lastChecked ? new Date(session.lastChecked).toLocaleString("ko-KR") : "시간 정보 없음"})`
-                : "세션 없음 (터미널에서 npm run cafe:login 실행)"}
+                : "세션 없음 (아래에 storageState JSON 업로드 필요)"}
           </p>
+          <div className="mt-4 space-y-2">
+            <p className="text-xs text-slate-500">
+              Worker가 네이버에 로그인된 상태로 접속하려면 Playwright storageState(JSON)가 필요합니다.
+              1회 생성 후 아래에 붙여넣고 저장하세요.
+            </p>
+            <textarea
+              value={storageStateText}
+              onChange={(e) => setStorageStateText(e.target.value)}
+              placeholder='여기에 storageState JSON 전체를 붙여넣기 (예: {"cookies":[...],"origins":[...]})'
+              className="w-full h-40 p-3 border border-slate-200 rounded-lg text-xs font-mono"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                onClick={saveSession}
+                disabled={savingSession}
+                className="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm disabled:opacity-50"
+              >
+                {savingSession ? "저장 중..." : "세션 저장"}
+              </button>
+              <button
+                onClick={deleteSession}
+                className="px-3 py-2 bg-slate-200 text-slate-900 rounded-lg text-sm"
+              >
+                세션 삭제
+              </button>
+            </div>
+          </div>
         </section>
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5">

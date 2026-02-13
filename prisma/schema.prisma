@@ -117,7 +117,9 @@ model BrandLink {
 model ScrapeJob {
   id             String   @id @default(uuid())
   createdBy      String
+  jobType        String   @default("SCRAPE") // SCRAPE, REFRESH_CAFES
   status         String   @default("QUEUED") // QUEUED, RUNNING, SUCCESS, FAILED
+  notifyChatId   String?
   keywords       String   // JSON 배열
   includeWords   String?  // JSON 배열
   excludeWords   String?  // JSON 배열
@@ -142,6 +144,18 @@ model ScrapeJob {
 
   @@index([createdAt])
   @@index([status])
+  @@index([jobType])
+}
+
+model CafeMembership {
+  id        String   @id @default(uuid())
+  cafeId    String   @unique
+  name      String
+  url       String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([updatedAt])
 }
 
 model ScrapePost {
