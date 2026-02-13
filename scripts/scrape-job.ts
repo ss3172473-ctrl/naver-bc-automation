@@ -33,6 +33,16 @@ type ParsedPost = {
   comments: ParsedComment[];
 };
 
+type ArticleCandidate = {
+  articleId: number;
+  url: string;
+  subject: string;
+  readCount: number;
+  commentCount: number;
+  likeCount: number;
+  boardType: string;
+};
+
 const prisma = new PrismaClient();
 const SESSION_FILE =
   process.env.NAVER_CAFE_SESSION_FILE ||
@@ -101,6 +111,15 @@ function cleanCafeText(text: string): string {
   const dropIfIncludes = [
     "본문 바로가기",
     "메뉴",
+    "카페홈",
+    "가입",
+    "검색",
+    "앱 열기",
+    "기타 기능",
+    "쪽지",
+    "공유",
+    "신고",
+    "댓글",
     "카페에 가입하면 바로 글을 볼 수 있어요",
     "가입해 보세요",
     "10초 만에 가입하기",
@@ -184,35 +203,81 @@ async function getClubId(page: Page, cafeId: string): Promise<string> {
   throw new Error(`clubid를 찾지 못했습니다. cafeId=${cafeId}`);
 }
 
-async function collectArticleUrls(page: Page, cafeId: string, maxUrls: number): Promise<string[]> {
-  const urls = new Set<string>();
-  const clubId = await getClubId(page, cafeId);
-  console.log(`[cafe] cafeId=${cafeId} clubId=${clubId}`);
+async function fetchCandidatesFromSearchApi(
+  page: Page,
+  cafeNumericId: string,
+  keyword: string,
+  pageNum: number
+): Promise<ArticleCandidate[]> {
+  const url =
+    `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
+    `?cafeId=${encodeURIComponent(cafeNumericId)}` +
+    `&query=${encodeURIComponent(keyword)}` +
+    `&searchBy=1&sortBy=date&page=${pageNum}&perPage=20` +
+    `&adUnit=MW_CAFE_BOARD&ad=true`;
 
-  // Mobile home page has direct ArticleRead links. We scroll a bit to load more.
-  await page.goto(`https://m.cafe.naver.com/${cafeId}`, { waitUntil: "domcontentloaded", timeout: 35000 });
-  await sleep(1200);
-
-  for (let i = 0; i < 10 && urls.size < maxUrls; i += 1) {
-    const hrefs = await page
-      .$$eval("a[href*='m.cafe.naver.com/ArticleRead.nhn']", (elements) =>
-        elements.map((el) => (el as HTMLAnchorElement).href).filter(Boolean)
-      )
-      .catch(() => []);
-
-    for (const href of hrefs) {
-      if (!href.includes("clubid=") || !href.includes("articleid=")) continue;
-      urls.add(href);
-      if (urls.size >= maxUrls) break;
-    }
-
-    if (urls.size >= maxUrls) break;
-    await page.mouse.wheel(0, 1800);
-    await sleep(800);
+  const resp = await page.request.get(url);
+  if (!resp.ok()) {
+    throw new Error(`Search API failed: ${resp.status()} ${url}`);
   }
 
-  console.log(`[collect] cafe=${cafeId} urls=${urls.size}`);
-  return Array.from(urls);
+  const json = await resp.json();
+  const list = json?.message?.result?.articleList || [];
+
+  const rows: ArticleCandidate[] = [];
+  for (const row of list) {
+    if (row?.type !== "ARTICLE") continue;
+    const item = row.item;
+    if (!item?.articleId) continue;
+
+    rows.push({
+      articleId: Number(item.articleId),
+      url:
+        `https://m.cafe.naver.com/ArticleRead.nhn?clubid=${encodeURIComponent(cafeNumericId)}` +
+        `&articleid=${encodeURIComponent(String(item.articleId))}` +
+        `&boardtype=${encodeURIComponent(item.boardType || "L")}`,
+      subject: String(item.subject || ""),
+      readCount: Number(item.readCount || 0),
+      commentCount: Number(item.commentCount || 0),
+      likeCount: Number(item.likeItCount || 0),
+      boardType: String(item.boardType || "L"),
+    });
+  }
+
+  return rows;
+}
+
+async function collectArticleCandidates(
+  page: Page,
+  cafeId: string,
+  keywords: string[],
+  maxUrls: number
+): Promise<{ cafeNumericId: string; candidates: ArticleCandidate[] }> {
+  const seen = new Set<number>();
+  const candidates: ArticleCandidate[] = [];
+  const cafeNumericId = await getClubId(page, cafeId);
+  console.log(`[cafe] cafeId=${cafeId} cafeNumericId=${cafeNumericId}`);
+
+  for (const keyword of keywords) {
+    console.log(`[collect] cafe=${cafeId} keyword=${keyword}`);
+    for (let pageNum = 1; pageNum <= 5 && candidates.length < maxUrls; pageNum += 1) {
+      const rows = await fetchCandidatesFromSearchApi(page, cafeNumericId, keyword, pageNum);
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        if (seen.has(row.articleId)) continue;
+        seen.add(row.articleId);
+        candidates.push(row);
+        if (candidates.length >= maxUrls) break;
+      }
+    }
+
+    if (candidates.length >= maxUrls) break;
+    await sleep(250);
+  }
+
+  console.log(`[collect] cafe=${cafeId} candidates=${candidates.length}`);
+  return { cafeNumericId, candidates };
 }
 
 async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName: string): Promise<ParsedPost | null> {
@@ -402,16 +467,21 @@ async function run(jobId: string) {
       const cafeId = cafeIds[i];
       const cafeName = cafeNames[i] || cafeId;
 
-      const urls = await collectArticleUrls(
+      const { candidates } = await collectArticleCandidates(
         page,
         cafeId,
+        keywords,
         Math.max(10, Math.ceil(job.maxPosts / Math.max(1, cafeIds.length)))
       );
 
-      for (const url of urls) {
+      for (const cand of candidates) {
         if (collected.length >= job.maxPosts) break;
 
-        const parsed = await parsePost(page, url, cafeId, cafeName).catch(() => null);
+        // Early filter by counts from list API (fast).
+        if (job.minViewCount !== null && cand.readCount < job.minViewCount) continue;
+        if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) continue;
+
+        const parsed = await parsePost(page, cand.url, cafeId, cafeName).catch(() => null);
         if (!parsed) continue;
 
         const normalizedForMatch = `${parsed.title}\n${parsed.contentText}`;
