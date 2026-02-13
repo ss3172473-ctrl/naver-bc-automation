@@ -224,12 +224,6 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     throw new Error("네이버 로그인 세션이 만료되었습니다.");
   }
 
-  const bodyProbe = await page.locator("body").innerText().catch(() => "");
-  if (looksLikeJoinWall(bodyProbe)) {
-    console.log(`[skip] join wall detected: ${page.url()}`);
-    return null;
-  }
-
   const frame = getArticleFrame(page);
 
   const title =
@@ -249,13 +243,14 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
 
   let contentText = "";
   let rawHtml = "";
+  let rawText = "";
   for (const selector of contentCandidates) {
     const loc = frame.locator(selector).first();
     if ((await loc.count()) === 0) continue;
 
     const text = ((await withTimeout(loc.innerText(), 8000, `innerText ${selector}`)) || "").trim();
     if (text.length < 20) continue;
-    if (looksLikeJoinWall(text)) continue;
+    rawText = text;
 
     contentText = cleanCafeText(text);
     rawHtml = await withTimeout(loc.innerHTML(), 8000, `innerHTML ${selector}`);
@@ -263,6 +258,12 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
   }
 
   if (!contentText) {
+    return null;
+  }
+
+  // If the page is effectively a join wall (only join prompts, no real content), skip it.
+  if (looksLikeJoinWall(rawText) && contentText.length < 80) {
+    console.log(`[skip] join wall only: ${page.url()}`);
     return null;
   }
 
