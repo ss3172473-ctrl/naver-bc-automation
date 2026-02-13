@@ -82,16 +82,26 @@ export async function POST(request: NextRequest) {
 
     const fromDate = body?.fromDate ? new Date(body.fromDate) : null;
     const toDate = body?.toDate ? new Date(body.toDate) : null;
-    const minViewCountRaw = Number(body?.minViewCount);
-    const minCommentCountRaw = Number(body?.minCommentCount);
+    const minViewCountRaw =
+      body?.minViewCount === null || body?.minViewCount === undefined
+        ? null
+        : Number(body.minViewCount);
+    const minCommentCountRaw =
+      body?.minCommentCount === null || body?.minCommentCount === undefined
+        ? null
+        : Number(body.minCommentCount);
     const useAutoFilter = Boolean(body?.useAutoFilter);
 
     const minViewCount =
-      Number.isFinite(minViewCountRaw) && minViewCountRaw >= 0
+      minViewCountRaw !== null &&
+      Number.isFinite(minViewCountRaw) &&
+      minViewCountRaw >= 0
         ? Math.floor(minViewCountRaw)
         : null;
     const minCommentCount =
-      Number.isFinite(minCommentCountRaw) && minCommentCountRaw >= 0
+      minCommentCountRaw !== null &&
+      Number.isFinite(minCommentCountRaw) &&
+      minCommentCountRaw >= 0
         ? Math.floor(minCommentCountRaw)
         : null;
 

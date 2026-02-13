@@ -304,76 +304,19 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
 
   const frame = getArticleFrame(page);
 
-  // Expand collapsed content if the mobile UI shows "더보기/전체보기" type buttons.
-  for (let i = 0; i < 6; i += 1) {
-    const btn = frame.locator("button, a").filter({ hasText: "더보기" }).first();
-    const btn2 = frame.locator("button, a").filter({ hasText: "전체" }).first();
-    const target = (await btn.count()) > 0 ? btn : (await btn2.count()) > 0 ? btn2 : null;
-    if (!target) break;
-    try {
-      await target.click({ timeout: 1500 });
-      await sleep(600);
-    } catch {
-      break;
-    }
-  }
-
-  // Scroll a bit to trigger lazy rendering inside the article.
-  try {
-    await page.mouse.wheel(0, 1800);
-    await sleep(400);
-    await page.mouse.wheel(0, 1800);
-    await sleep(400);
-  } catch {
-    // ignore
-  }
-
   const title =
     (await frame.locator(".title_text, h3, h2").first().textContent().catch(() => null))?.trim() ||
     (await page.title());
 
-  const contentCandidates = [
-    ".se-main-container",
-    ".ArticleContentBox",
-    ".article_viewer",
-    "#tbody",
-    "#postContent",
-    ".ContentRenderer",
-    "[class*='Article'] [class*='Content']",
-    "[role='main']",
-    "article",
-  ];
+  // User-requested mode: store all visible text on the page as-is (no cleaning/segmentation).
+  const pageText = (await withTimeout(frame.locator("body").innerText(), 12000, "body innerText"))
+    .trim();
+  if (!pageText) return null;
 
-  let contentText = "";
-  let rawHtml = "";
-  let rawText = "";
-  let bestLen = 0;
-  for (const selector of contentCandidates) {
-    const loc = frame.locator(selector).first();
-    if ((await loc.count()) === 0) continue;
+  const contentText = pageText;
+  const rawHtml = await withTimeout(frame.locator("body").innerHTML(), 12000, "body innerHTML");
 
-    const text = ((await withTimeout(loc.innerText(), 8000, `innerText ${selector}`)) || "").trim();
-    if (text.length < 20) continue;
-    const cleaned = cleanCafeText(text);
-    if (cleaned.length <= bestLen) continue;
-
-    bestLen = cleaned.length;
-    rawText = text;
-    contentText = cleaned;
-    rawHtml = await withTimeout(loc.innerHTML(), 8000, `innerHTML ${selector}`);
-  }
-
-  if (!contentText) {
-    return null;
-  }
-
-  // If the page is effectively a join wall (only join prompts, no real content), skip it.
-  if (looksLikeJoinWall(rawText) && contentText.length < 80) {
-    console.log(`[skip] join wall only: ${page.url()}`);
-    return null;
-  }
-
-  const fullText = await withTimeout(frame.locator("body").innerText(), 8000, "body innerText");
+  const fullText = pageText;
   const viewMatch = fullText.match(/조회\s*([\d,]+)/);
   const likeMatch = fullText.match(/좋아요\s*([\d,]+)/);
   const commentMatch = fullText.match(/댓글\s*([\d,]+)/);
