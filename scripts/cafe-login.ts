@@ -49,21 +49,31 @@ async function main() {
   });
 
   console.log("브라우저가 열렸습니다. 로그인 완료를 감지 중입니다...");
+  console.log("팁: 로그인 후에도 이 창을 닫지 마세요. 자동으로 쿠키를 확인한 뒤 종료합니다.");
 
+  // Naver logged-in session is represented by cookies like NID_AUT / NID_SES.
+  // URL 변화만으로는 로그인 감지가 실패할 수 있어, 쿠키 기반으로 확정한다.
+  const mustHaveCookies = ["NID_AUT", "NID_SES"];
   let isLoggedIn = false;
-  for (let i = 0; i < 300; i++) {
+
+  for (let i = 0; i < 600; i++) {
     await page.waitForTimeout(1000);
-    const url = page.url();
-    if (url.includes("naver.com") && !url.includes("nidlogin")) {
+
+    const cookies = await context.cookies();
+    const cookieNames = new Set(cookies.map((c) => c.name));
+    const ok = mustHaveCookies.every((name) => cookieNames.has(name));
+
+    if (ok) {
       isLoggedIn = true;
       break;
     }
   }
 
   if (!isLoggedIn) {
-    console.log("로그인 자동 감지 실패. 현재 상태로 세션을 저장합니다.");
+    console.log("로그인 쿠키(NID_AUT/NID_SES) 감지 실패. (로그인이 안 됐거나, 쿠키가 차단됐을 수 있습니다.)");
+    console.log("그래도 현재 상태로 세션을 저장합니다. 이후 스크랩이 로그인 페이지로 튕기면 다시 시도하세요.");
   } else {
-    console.log("로그인 감지됨. 세션 저장 중...");
+    console.log("로그인 쿠키 감지됨. 세션 저장 중...");
   }
 
   await context.storageState({ path: SESSION_FILE });
