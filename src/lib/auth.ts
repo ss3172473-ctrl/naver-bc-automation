@@ -72,16 +72,14 @@ export async function getCurrentUser(): Promise<{ username: string } | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(AUTH_COOKIE_NAME)?.value;
 
-  if (!token) {
-    return null;
-  }
+  // Auth disabled mode (user requested "link-only" access).
+  // If a valid token exists, keep using it. Otherwise treat as a single public user.
+  if (!token) return { username: "public" };
 
   const parsed = verifyAuthToken(token);
-  if (!parsed) {
-    return null;
-  }
+  if (!parsed) return { username: "public" };
 
-  return { username: parsed.username };
+  return { username: parsed.username || "public" };
 }
 
 export function validateAppCredential(username: string, password: string): boolean {

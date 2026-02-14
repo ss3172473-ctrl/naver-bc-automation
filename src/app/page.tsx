@@ -226,12 +226,12 @@ export default function DashboardPage() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-100 p-4 md:p-8">
+    <main className="min-h-screen bg-slate-100 p-4 md:p-8 text-black">
       <div className="max-w-6xl mx-auto space-y-6">
         <header className="bg-white border border-slate-200 rounded-2xl p-5 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">카페 아카이빙 대시보드</h1>
-            <p className="text-sm text-slate-500">열람 가능한 글을 조건 기반으로 아카이빙하고 Google Sheets로 보냅니다.</p>
+            <h1 className="text-2xl font-bold text-black">카페 아카이빙 대시보드</h1>
+            <p className="text-sm text-black">열람 가능한 글을 조건 기반으로 아카이빙하고 Google Sheets로 보냅니다.</p>
           </div>
           <button onClick={handleLogout} className="px-4 py-2 text-sm bg-slate-900 text-white rounded-lg">
             로그아웃
@@ -239,8 +239,8 @@ export default function DashboardPage() {
         </header>
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5">
-          <h2 className="text-lg font-semibold text-slate-900">1) 카페 세션 확인</h2>
-          <p className="text-sm text-slate-500 mt-1">
+          <h2 className="text-lg font-semibold text-black">1) 카페 세션 확인</h2>
+          <p className="text-sm text-black mt-1">
             {sessionLoading
               ? "세션 확인 중..."
               : session?.hasSession
@@ -248,7 +248,7 @@ export default function DashboardPage() {
                 : "세션 없음 (아래에 storageState JSON 업로드 필요)"}
           </p>
           <div className="mt-4 space-y-2">
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-black">
               Worker가 네이버에 로그인된 상태로 접속하려면 Playwright storageState(JSON)가 필요합니다.
               1회 생성 후 아래에 붙여넣고 저장하세요.
             </p>
@@ -278,7 +278,7 @@ export default function DashboardPage() {
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-slate-900">2) 카페 선택</h2>
+            <h2 className="text-lg font-semibold text-black">2) 카페 선택</h2>
             <button onClick={fetchCafes} disabled={cafesLoading} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm disabled:opacity-50">
               {cafesLoading ? "불러오는 중..." : "가입 카페 불러오기"}
             </button>
@@ -295,7 +295,7 @@ export default function DashboardPage() {
                     <input type="checkbox" checked={checked} onChange={() => toggleCafe(cafe.cafeId)} className="mt-1" />
                     <div className="min-w-0">
                       <p className="font-medium text-slate-900 truncate">{cafe.name}</p>
-                      <p className="text-xs text-slate-500 truncate">{cafe.url}</p>
+                      <p className="text-xs text-black truncate">{cafe.url}</p>
                     </div>
                   </div>
                 </label>
@@ -305,7 +305,7 @@ export default function DashboardPage() {
         </section>
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-          <h2 className="text-lg font-semibold text-slate-900">3) 실행 조건</h2>
+          <h2 className="text-lg font-semibold text-black">3) 실행 조건</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
               <label className="text-sm text-slate-700">키워드 목록 (쉼표 구분, 공백 자동 제거)</label>
@@ -361,16 +361,16 @@ export default function DashboardPage() {
         </section>
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">최근 작업</h2>
+          <h2 className="text-lg font-semibold text-black mb-4">최근 작업</h2>
           {jobsLoading ? (
-            <p className="text-sm text-slate-500">불러오는 중...</p>
+            <p className="text-sm text-black">불러오는 중...</p>
           ) : jobs.length === 0 ? (
-            <p className="text-sm text-slate-500">등록된 작업이 없습니다.</p>
+            <p className="text-sm text-black">등록된 작업이 없습니다.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-slate-200 text-slate-500">
+                  <tr className="border-b border-slate-200 text-black">
                     <th className="text-left py-2">생성일</th>
                     <th className="text-left py-2">키워드</th>
                     <th className="text-left py-2">카페</th>
