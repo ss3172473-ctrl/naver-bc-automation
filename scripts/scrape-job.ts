@@ -88,6 +88,26 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseJsonStringArray(raw: unknown): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw.map((v) => String(v || "").trim()).filter(Boolean);
+  }
+  const s = String(raw).trim();
+  if (!s) return [];
+  try {
+    const parsed = JSON.parse(s);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((v: any) => String(v || "").trim()).filter(Boolean);
+  } catch {
+    // Fallback for legacy/invalid values: treat as comma list.
+    return s
+      .split(",")
+      .map((v) => v.trim().replace(/\s+/g, ""))
+      .filter(Boolean);
+  }
+}
+
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | null = null;
   const timeout = new Promise<never>((_, reject) => {
@@ -809,12 +829,12 @@ async function run(jobId: string) {
     data: { status: "RUNNING", startedAt: new Date(), errorMessage: null },
   });
 
-  const keywords = JSON.parse(job.keywords || "[]") as string[];
-  const directUrls = JSON.parse(job.directUrls || "[]") as string[];
-  const includeWords = JSON.parse(job.includeWords || "[]") as string[];
-  const excludeWords = JSON.parse(job.excludeWords || "[]") as string[];
-  const cafeIds = JSON.parse(job.cafeIds || "[]") as string[];
-  const cafeNames = JSON.parse(job.cafeNames || "[]") as string[];
+  const keywords = parseJsonStringArray(job.keywords);
+  const directUrls = parseJsonStringArray(job.directUrls);
+  const includeWords = parseJsonStringArray(job.includeWords);
+  const excludeWords = parseJsonStringArray(job.excludeWords);
+  const cafeIds = parseJsonStringArray(job.cafeIds);
+  const cafeNames = parseJsonStringArray(job.cafeNames);
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
