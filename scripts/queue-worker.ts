@@ -18,7 +18,7 @@ function spawnScript(scriptFile: string, args: string[] = []) {
 async function clearStaleRunningJobs() {
   // If a scrape process crashes or hangs, jobs can be left in RUNNING forever.
   // Auto-fail stale RUNNING jobs so the worker can continue processing the queue.
-  const staleMs = 1000 * 60 * 20; // 20 minutes
+  const staleMs = 1000 * 60 * 5; // 5 minutes
   const cutoff = new Date(Date.now() - staleMs);
 
   const stale = await prisma.scrapeJob.findMany({
