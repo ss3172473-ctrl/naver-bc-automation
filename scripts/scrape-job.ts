@@ -477,6 +477,13 @@ function getClubIdFromUrl(url: string): string | null {
   return m?.[1] || null;
 }
 
+function buildFeArticleUrl(clubid: string, articleid: string): string {
+  return (
+    `https://cafe.naver.com/ca-fe/cafes/${encodeURIComponent(clubid)}` +
+    `/articles/${encodeURIComponent(articleid)}`
+  );
+}
+
 async function getClubId(page: Page, cafeId: string): Promise<string> {
   // If the "cafeId" is already numeric, treat it as clubId.
   if (/^\d+$/.test(cafeId)) {
@@ -611,46 +618,43 @@ async function parsePost(
   console.log(`[parse] ${sourceUrl}`);
   const canonicalUrl = sourceUrl;
 
-  await withTimeout(page.goto(canonicalUrl, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto");
+  // Prefer the newer FE article URL: it avoids iframe/wrapper issues and exposes a simpler DOM for body/comments.
+  const expectedArticleId = getArticleIdFromUrl(canonicalUrl);
+  const feUrl = expectedArticleId ? buildFeArticleUrl(cafeNumericId, expectedArticleId) : null;
+  const primaryUrl = feUrl || canonicalUrl;
+
+  await withTimeout(page.goto(primaryUrl, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto");
   await sleep(1200);
   console.log(`[parse] loaded url=${page.url()}`);
-
-  // If we landed on a menu/wrapper page, force the canonical ArticleRead URL.
-  const expectedArticleId = getArticleIdFromUrl(canonicalUrl);
-  if (expectedArticleId && isProbablyCafeMenuUrl(page.url())) {
-    const forced =
-      `https://cafe.naver.com/ArticleRead.nhn?clubid=${encodeURIComponent(cafeNumericId)}` +
-      `&articleid=${encodeURIComponent(expectedArticleId)}`;
-    console.log(`[parse] redirected to menu; forcing ArticleRead: ${forced}`);
-    await withTimeout(page.goto(forced, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto forced");
-    await sleep(1200);
-    console.log(`[parse] forced loaded url=${page.url()}`);
-  }
 
   if (page.url().includes("nidlogin")) {
     throw new Error("네이버 로그인 세션이 만료되었습니다.");
   }
 
-  // Prefer the real cafe_main frame (PC 본문이 들어있는 프레임).
+  // For FE URL we can extract directly from the page (no iframe). For legacy URLs, fall back to cafe_main.
   let frame: Frame | Page = page;
-  const cafeMain = await waitForCafeMainFrame(page, 8000);
-  if (cafeMain) {
-    frame = cafeMain;
-    console.log(`[parse] using cafe_main frame url=${cafeMain.url()}`);
-  } else if (expectedArticleId) {
-    const match = page
-      .frames()
-      .find((f) => f.url().includes("ArticleRead") && f.url().includes(`articleid=${expectedArticleId}`));
-    if (match) {
-      frame = match;
-      console.log(`[parse] using ArticleRead frame url=${match.url()}`);
+  if (!feUrl) {
+    const cafeMain = await waitForCafeMainFrame(page, 8000);
+    if (cafeMain) {
+      frame = cafeMain;
+      console.log(`[parse] using cafe_main frame url=${cafeMain.url()}`);
+    } else if (expectedArticleId) {
+      const match = page
+        .frames()
+        .find((f) => f.url().includes("ArticleRead") && f.url().includes(`articleid=${expectedArticleId}`));
+      if (match) {
+        frame = match;
+        console.log(`[parse] using ArticleRead frame url=${match.url()}`);
+      } else {
+        frame = getArticleFrame(page);
+        console.log("[parse] cafe_main not found; using heuristic frame");
+      }
     } else {
       frame = getArticleFrame(page);
-      console.log("[parse] cafe_main not found; using heuristic frame");
+      console.log("[parse] expectedArticleId missing; using heuristic frame");
     }
   } else {
-    frame = getArticleFrame(page);
-    console.log("[parse] expectedArticleId missing; using heuristic frame");
+    console.log("[parse] using FE article page (no iframe)");
   }
 
   // User request: we mainly need full page text. Title/author/date are optional metadata.
@@ -694,19 +698,14 @@ async function parsePost(
   let commentsTextRaw = await extractCommentsText(frame);
   let commentsText = String(commentsTextRaw || "").trim();
 
-  // Comments sometimes appear only on the newer FE article URL.
-  // If we couldn't see comments, retry on /ca-fe/cafes/{clubid}/articles/{articleid}.
-  if (!commentsText && expectedArticleId && cafeNumericId) {
-    const feUrl =
-      `https://cafe.naver.com/ca-fe/cafes/${encodeURIComponent(cafeNumericId)}` +
-      `/articles/${encodeURIComponent(expectedArticleId)}`;
-    if (!page.url().includes(`/cafes/${cafeNumericId}/articles/${expectedArticleId}`)) {
-      console.log(`[parse] retrying comments via FE url: ${feUrl}`);
-      await withTimeout(page.goto(feUrl, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto feUrl")
-        .catch(() => undefined);
-      await sleep(1200);
-      console.log(`[parse] FE loaded url=${page.url()}`);
-    }
+  // If we didn't start on FE URL (legacy path), comments may still be in the FE page.
+  if (!commentsText && !feUrl && expectedArticleId) {
+    const retryUrl = buildFeArticleUrl(cafeNumericId, expectedArticleId);
+    console.log(`[parse] retrying comments via FE url: ${retryUrl}`);
+    await withTimeout(page.goto(retryUrl, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto feUrl")
+      .catch(() => undefined);
+    await sleep(1200);
+    console.log(`[parse] FE loaded url=${page.url()}`);
     commentsTextRaw = await extractCommentsText(page);
     commentsText = String(commentsTextRaw || "").trim();
   }
