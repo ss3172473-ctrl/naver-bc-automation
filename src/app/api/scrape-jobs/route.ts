@@ -6,14 +6,14 @@ function parseStringList(input: unknown): string[] {
   // Accept both JSON-style arrays and comma-separated strings.
   if (Array.isArray(input)) {
     return input
-      .map((item) => String(item || "").trim())
+      .map((item) => String(item || "").trim().replace(/\s+/g, ""))
       .filter((item) => item.length > 0);
   }
   const raw = String(input || "").trim();
   if (!raw) return [];
   return raw
     .split(",")
-    .map((item) => item.trim())
+    .map((item) => item.trim().replace(/\s+/g, ""))
     .filter(Boolean);
 }
 

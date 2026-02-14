@@ -306,7 +306,12 @@ async function waitForCafeMainFrame(page: Page, ms: number): Promise<Frame | nul
       const url = String(f.url?.() || "");
       if (url && url !== "about:blank") return f;
       // Sometimes the frame exists early with about:blank. Wait until it actually contains article DOM.
-      const hasContent = await f.locator("div.se-main-container, div.article_viewer").count().catch(() => 0);
+      const hasContent = await f
+        .locator(
+          "div.se-main-container, div.se-viewer, div.article_viewer, #tbody, div.ArticleContentBox, div.ContentRenderer"
+        )
+        .count()
+        .catch(() => 0);
       if (hasContent > 0) return f;
     }
     await sleep(150);
@@ -320,6 +325,9 @@ async function extractBestText(target: Frame | Page): Promise<string> {
     // SmartEditor 3
     "div.se-main-container",
     "div.se-viewer",
+    // FE/PC
+    "div.ArticleContentBox",
+    "div.ContentRenderer",
     // Legacy / other renderers
     "div.article_viewer",
     "div.ContentRenderer",
@@ -357,19 +365,56 @@ async function extractBestText(target: Frame | Page): Promise<string> {
 }
 
 async function extractPostBodyText(target: Frame | Page): Promise<string> {
-  // Try to focus on actual post body containers first.
-  // Return raw visible text (no heavy cleaning) so the user gets "what they can see" for archiving.
-  await (target as any)
-    .waitForSelector("div.se-main-container, div.article_viewer, #tbody", { timeout: 15000 })
-    .catch(() => undefined);
+  // Focus on actual post body containers first.
+  // Bug we're fixing: sometimes we capture profile/post-list/menu text instead of the article body.
+  // Strategy:
+  // - Try many known containers (FE/legacy/old editor).
+  // - Pick the best (longest) candidate that does NOT look like join/permission/profile/list UI.
+  // - Never fall back to whole-page text here; if we can't confidently locate the body, return "" and let parsePost retry via other URL variants.
 
-  const selectors = [
+  const waitSelectors = [
+    // SmartEditor 3
     "div.se-main-container",
     "div.se-viewer",
-    "div.article_viewer",
+    // FE/PC containers
+    "div.ArticleContentBox",
+    "div.ArticleContentBox__content",
     "div.ContentRenderer",
+    // Legacy
+    "div.article_viewer",
     "#tbody",
+    // Generic
+    "article",
+    "main",
+  ].join(", ");
+
+  await (target as any).waitForSelector(waitSelectors, { timeout: 15000 }).catch(() => undefined);
+
+  const selectors = [
+    // Highest priority: SmartEditor 3 (most common for text posts)
+    "div.se-main-container",
+    "div.se-viewer",
+    // FE article page variants (class names sometimes change)
+    "div.ArticleContentBox div.se-main-container",
+    "div.ArticleContentBox",
+    "div[class*='ArticleContentBox']",
+    "div[class*='ContentRenderer']",
+    "div.ContentRenderer",
+    // Legacy / old editor
+    "#tbody",
+    "div.article_viewer",
+    // Last resort inside doc, but still structured
+    "article",
+    "main",
   ];
+
+  const bad = (txt: string) =>
+    looksLikeJoinWall(txt) ||
+    looksLikePermissionWall(txt) ||
+    looksLikeProfileOrPostList(txt);
+
+  let best = "";
+  let bestSel = "";
 
   for (const sel of selectors) {
     try {
@@ -377,23 +422,26 @@ async function extractPostBodyText(target: Frame | Page): Promise<string> {
       const count = await loc.count().catch(() => 0);
       if (count === 0) continue;
 
-      // Some pages may render multiple matching nodes (hidden/duplicated). Pick the best candidate.
-      let best = "";
-      const take = Math.min(count, 4);
+      const take = Math.min(count, 6);
       for (let i = 0; i < take; i += 1) {
         const txt = String(
           await withTimeout(loc.nth(i).innerText(), 20000, `body innerText ${sel}#${i}`)
         ).trim();
         if (!txt) continue;
-        if (looksLikePermissionWall(txt)) continue;
-        if (looksLikeProfileOrPostList(txt)) continue;
-        if (txt.length > best.length) best = txt;
+        if (bad(txt)) continue;
+        if (txt.length > best.length) {
+          best = txt;
+          bestSel = `${sel}#${i}`;
+        }
       }
-
-      if (best) return best;
     } catch {
       // ignore
     }
+  }
+
+  if (best) {
+    console.log(`[extract] body selector=${bestSel} len=${best.length}`);
+    return best;
   }
 
   return "";
@@ -512,6 +560,14 @@ function buildFeArticleUrl(clubid: string, articleid: string): string {
   );
 }
 
+function buildMobileFeArticleUrl(clubid: string, articleid: string): string {
+  // Mobile FE tends to have a simpler DOM for some articles (especially where PC wraps in frames).
+  return (
+    `https://m.cafe.naver.com/ca-fe/web/cafes/${encodeURIComponent(clubid)}` +
+    `/articles/${encodeURIComponent(articleid)}`
+  );
+}
+
 async function getClubId(page: Page, cafeId: string): Promise<string> {
   // If the "cafeId" is already numeric, treat it as clubId.
   if (/^\d+$/.test(cafeId)) {
@@ -614,7 +670,8 @@ async function collectArticleCandidates(
   // Requirement: for each selected cafe, search each keyword at least once.
   // To keep the Worker stable even with huge keyword lists, we only call the search API once per keyword (page=1).
   // We still cap how many candidates we keep in memory, but we do not skip the search calls.
-  const perKeywordTake = Math.min(20, Math.max(1, Math.floor(maxUrls / Math.max(1, keywords.length))));
+  // Keep this small: parsing posts is the expensive step; too many candidates just increases timeouts.
+  const perKeywordTake = Math.min(6, Math.max(1, Math.floor(maxUrls / Math.max(1, keywords.length))));
 
   for (const keyword of keywords) {
     console.log(`[collect] cafe=${cafeId} keyword=${keyword}`);
@@ -631,6 +688,15 @@ async function collectArticleCandidates(
     }
     await sleep(180);
   }
+
+  // Reduce parse load: keep the newest candidates first (search API is date-sorted, but merging across
+  // multiple keywords can reorder); also keep the list tight.
+  candidates.sort((a, b) => {
+    const at = a.addedAt ? a.addedAt.getTime() : 0;
+    const bt = b.addedAt ? b.addedAt.getTime() : 0;
+    return bt - at;
+  });
+  if (candidates.length > maxUrls) candidates.length = maxUrls;
 
   console.log(`[collect] cafe=${cafeId} candidates=${candidates.length}`);
   return { cafeNumericId, candidates };
@@ -650,133 +716,189 @@ async function parsePost(
   // Prefer the newer FE article URL: it avoids iframe/wrapper issues and exposes a simpler DOM for body/comments.
   const expectedArticleId = getArticleIdFromUrl(canonicalUrl);
   const feUrl = expectedArticleId ? buildFeArticleUrl(cafeNumericId, expectedArticleId) : null;
-  const primaryUrl = feUrl || canonicalUrl;
+  const mobileFeUrl =
+    expectedArticleId ? buildMobileFeArticleUrl(cafeNumericId, expectedArticleId) : null;
 
-  await withTimeout(page.goto(primaryUrl, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto");
-  await sleep(1200);
-  console.log(`[parse] loaded url=${page.url()}`);
+  // We'll try a small set of URL variants because Naver Cafe has multiple render paths.
+  // Goal: reliably capture the *article body text* (not menu/profile/list UI).
+  const urlVariants = [feUrl, canonicalUrl, mobileFeUrl].filter(Boolean) as string[];
+  const visited: string[] = [];
 
-  if (page.url().includes("nidlogin")) {
-    throw new Error("네이버 로그인 세션이 만료되었습니다.");
-  }
+  let lastBody = "";
+  let lastComments = "";
 
-  // For FE URL we can extract directly from the page (no iframe). For legacy URLs, fall back to cafe_main.
-  let frame: Frame | Page = page;
-  if (!feUrl) {
-    const cafeMain = await waitForCafeMainFrame(page, 8000);
-    if (cafeMain) {
-      frame = cafeMain;
-      console.log(`[parse] using cafe_main frame url=${cafeMain.url()}`);
-    } else if (expectedArticleId) {
-      const match = page
-        .frames()
-        .find((f) => f.url().includes("ArticleRead") && f.url().includes(`articleid=${expectedArticleId}`));
-      if (match) {
-        frame = match;
-        console.log(`[parse] using ArticleRead frame url=${match.url()}`);
+  for (const u of urlVariants) {
+    visited.push(u);
+    await withTimeout(page.goto(u, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto");
+    await sleep(1200);
+    console.log(`[parse] loaded url=${page.url()}`);
+
+    if (page.url().includes("nidlogin")) {
+      throw new Error("네이버 로그인 세션이 만료되었습니다.");
+    }
+
+    const isFeLike = u.includes("/ca-fe/") && u.includes("/articles/");
+
+    // For FE URL we can extract directly from the page (no iframe). For legacy URLs, fall back to cafe_main.
+    let frame: Frame | Page = page;
+    if (!isFeLike) {
+      const cafeMain = await waitForCafeMainFrame(page, 8000);
+      if (cafeMain) {
+        frame = cafeMain;
+        console.log(`[parse] using cafe_main frame url=${cafeMain.url()}`);
+      } else if (expectedArticleId) {
+        const match = page
+          .frames()
+          .find((f) => f.url().includes("ArticleRead") && f.url().includes(`articleid=${expectedArticleId}`));
+        if (match) {
+          frame = match;
+          console.log(`[parse] using ArticleRead frame url=${match.url()}`);
+        } else {
+          frame = getArticleFrame(page);
+          console.log("[parse] cafe_main not found; using heuristic frame");
+        }
       } else {
         frame = getArticleFrame(page);
-        console.log("[parse] cafe_main not found; using heuristic frame");
+        console.log("[parse] expectedArticleId missing; using heuristic frame");
       }
     } else {
-      frame = getArticleFrame(page);
-      console.log("[parse] expectedArticleId missing; using heuristic frame");
-    }
-  } else {
-    console.log("[parse] using FE article page (no iframe)");
-  }
-
-  // User request: we mainly need full page text. Title/author/date are optional metadata.
-  // Use the search API subject as the title to avoid DOM selector fragility.
-  const title = (fallbackTitle || "").trim() || (await page.title());
-
-  // Expand common "더보기/펼치기" UI so long posts aren't truncated in innerText.
-  // This is not a bypass; it's the same action a user would do before copy/paste.
-  const expandRegex = /더보기|펼쳐|전체\s*보기|전체\s*글|more/i;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const candidates = frame.locator("button, a, span").filter({ hasText: expandRegex });
-    const count = await candidates.count().catch(() => 0);
-    if (count === 0) break;
-
-    const clicks = Math.min(count, 6);
-    for (let i = 0; i < clicks; i += 1) {
-      await candidates.nth(i).click({ timeout: 1500 }).catch(() => undefined);
-      await sleep(200);
+      console.log("[parse] using FE-like article page (no iframe)");
     }
 
+    // User request: we mainly need full visible article text. Title/author/date are optional metadata.
+    // Use the search API subject as the title to avoid DOM selector fragility.
+    let title = (fallbackTitle || "").trim() || (await page.title());
+
+    // Expand common "더보기/펼치기" UI so long posts aren't truncated in innerText.
+    // This is not a bypass; it's the same action a user would do before copy/paste.
+    const expandRegex = /더보기|펼쳐|전체\s*보기|전체\s*글|more/i;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const candidates = frame.locator("button, a, span").filter({ hasText: expandRegex });
+      const count = await candidates.count().catch(() => 0);
+      if (count === 0) break;
+
+      const clicks = Math.min(count, 6);
+      for (let i = 0; i < clicks; i += 1) {
+        await candidates.nth(i).click({ timeout: 1500 }).catch(() => undefined);
+        await sleep(200);
+      }
+
+      await frame
+        .evaluate(() => {
+          window.scrollTo(0, document.body.scrollHeight);
+        })
+        .catch(() => undefined);
+      await sleep(400);
+    }
+
+    // Always scroll to ensure article body/comments are rendered before extraction.
     await frame
       .evaluate(() => {
         window.scrollTo(0, document.body.scrollHeight);
       })
       .catch(() => undefined);
-    await sleep(400);
+    await sleep(800);
+
+    console.log("[parse] extracting post body/comments text");
+    const bodyTextRaw = await extractPostBodyText(frame);
+    let bodyText = String(bodyTextRaw || "").trim();
+    if (!bodyText) {
+      const fallback = String(await extractBestText(frame).catch(() => "")).trim();
+      const cleaned = cleanCafeText(fallback);
+      if (cleaned && !looksLikeJoinWall(cleaned) && !looksLikePermissionWall(cleaned) && !looksLikeProfileOrPostList(cleaned)) {
+        bodyText = cleaned;
+        console.log(`[parse] body fallback via extractBestText len=${bodyText.length}`);
+      }
+    }
+    const sourceLine = String(await extractSourceLineText(frame).catch(() => "")).trim();
+    let commentsTextRaw = await extractCommentsText(frame);
+    let commentsText = String(commentsTextRaw || "").trim();
+
+    // If we came from legacy path, comments may render better on FE page.
+    if (!commentsText && !isFeLike && expectedArticleId) {
+      const retryUrl = buildFeArticleUrl(cafeNumericId, expectedArticleId);
+      console.log(`[parse] retrying comments via FE url: ${retryUrl}`);
+      await withTimeout(
+        page.goto(retryUrl, { waitUntil: "domcontentloaded", timeout: 35000 }),
+        45000,
+        "page.goto feUrl"
+      ).catch(() => undefined);
+      await sleep(1200);
+      console.log(`[parse] FE loaded url=${page.url()}`);
+      commentsTextRaw = await extractCommentsText(page);
+      commentsText = String(commentsTextRaw || "").trim();
+    }
+
+    lastBody = bodyText;
+    lastComments = commentsText;
+
+    const joinedForChecks = `${bodyText}\n${commentsText}`.trim();
+    if (!joinedForChecks) continue;
+    if (looksLikeJoinWall(joinedForChecks)) continue;
+    if (looksLikePermissionWall(joinedForChecks)) continue;
+
+    // If the "body" looks like profile/list UI, treat it as failure unless we have real comments.
+    if (looksLikeProfileOrPostList(bodyText) && !commentsText) {
+      console.log("[parse] body looks like profile/list UI; retrying via next URL variant");
+      continue;
+    }
+
+    // Improve title for directUrl mode (where fallbackTitle is empty and page.title is often generic like "네이버 카페").
+    if (!(fallbackTitle || "").trim() && (title.trim().length < 2 || title.includes("네이버 카페"))) {
+      const lines = bodyText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      // Many cafes render: [게시판명] + [제목] + ...
+      if (lines.length >= 2) title = lines[1];
+      else if (lines.length >= 1) title = lines[0];
+    }
+
+    const bodyPlusSource =
+      sourceLine && bodyText && !bodyText.includes(sourceLine)
+        ? `${bodyText}\n\n${sourceLine}`.trim()
+        : bodyText;
+    const contentText = commentsText
+      ? `${bodyPlusSource}\n\n[댓글]\n${commentsText}`.trim()
+      : bodyPlusSource;
+
+    console.log(
+      `[parse] extracted body len=${bodyText.length} comments len=${commentsText.length} total len=${contentText.length}`
+    );
+
+    // User-requested mode: only archive visible text. HTML extraction is slow/flaky on Naver Cafe PC and
+    // can cause timeouts; skip it to improve reliability.
+    const rawHtml: string | null = null;
+
+    // Skip author/date parsing (unstable selectors; not needed for the user's sheet workflow).
+    const authorName = "";
+    const publishedAt = null;
+
+    // We store combined text in contentText (body + comments) for Sheets.
+    const comments: ParsedComment[] = [];
+
+    return {
+      // Keep the canonical post link (do not store redirected menu URLs).
+      sourceUrl: canonicalUrl,
+      cafeId,
+      cafeName,
+      cafeUrl: getCafeUrl(cafeId),
+      title: title || "",
+      authorName,
+      publishedAt,
+      viewCount: 0,
+      likeCount: 0,
+      commentCount: 0,
+      contentText,
+      rawHtml,
+      comments,
+    };
   }
 
-  // Always scroll to ensure article body/comments are rendered before extraction.
-  await frame
-    .evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
-    })
-    .catch(() => undefined);
-  await sleep(800);
-
-  console.log("[parse] extracting post body/comments text");
-  const bodyTextRaw = await extractPostBodyText(frame);
-  const bodyText = String(bodyTextRaw || "").trim();
-  const sourceLine = String(await extractSourceLineText(frame).catch(() => "")).trim();
-  let commentsTextRaw = await extractCommentsText(frame);
-  let commentsText = String(commentsTextRaw || "").trim();
-
-  // If we didn't start on FE URL (legacy path), comments may still be in the FE page.
-  if (!commentsText && !feUrl && expectedArticleId) {
-    const retryUrl = buildFeArticleUrl(cafeNumericId, expectedArticleId);
-    console.log(`[parse] retrying comments via FE url: ${retryUrl}`);
-    await withTimeout(page.goto(retryUrl, { waitUntil: "domcontentloaded", timeout: 35000 }), 45000, "page.goto feUrl")
-      .catch(() => undefined);
-    await sleep(1200);
-    console.log(`[parse] FE loaded url=${page.url()}`);
-    commentsTextRaw = await extractCommentsText(page);
-    commentsText = String(commentsTextRaw || "").trim();
-  }
-
-  const joinedForChecks = `${bodyText}\n${commentsText}`.trim();
-  if (!joinedForChecks) return null;
-  if (looksLikeJoinWall(joinedForChecks)) return null;
-  if (looksLikePermissionWall(joinedForChecks)) return null;
-  if (looksLikeProfileOrPostList(joinedForChecks) && !commentsText) return null;
-
-  const bodyPlusSource = sourceLine && !bodyText.includes(sourceLine) ? `${bodyText}\n\n${sourceLine}`.trim() : bodyText;
-  const contentText = commentsText ? `${bodyPlusSource}\n\n[댓글]\n${commentsText}`.trim() : bodyPlusSource;
   console.log(
-    `[parse] extracted body len=${bodyText.length} comments len=${commentsText.length} total len=${contentText.length}`
+    `[parse] failed to extract a valid body/comments via variants. visited=${visited.length} lastBodyLen=${lastBody.length} lastCommentsLen=${lastComments.length}`
   );
-  // User-requested mode: only archive visible text. HTML extraction is slow/flaky on Naver Cafe PC and
-  // can cause timeouts; skip it to improve reliability.
-  const rawHtml: string | null = null;
-
-  // Skip author/date parsing (unstable selectors; not needed for the user's sheet workflow).
-  const authorName = "";
-  const publishedAt = null;
-
-  // We store combined text in contentText (body + comments) for Sheets.
-  const comments: ParsedComment[] = [];
-
-  return {
-    // Keep the canonical post link (do not store redirected menu URLs).
-    sourceUrl: canonicalUrl,
-    cafeId,
-    cafeName,
-    cafeUrl: getCafeUrl(cafeId),
-    title: title || "",
-    authorName,
-    publishedAt,
-    viewCount: 0,
-    likeCount: 0,
-    commentCount: 0,
-    contentText,
-    rawHtml,
-    comments,
-  };
+  return null;
 }
 
 function writeCsv(jobId: string, posts: ParsedPost[]): string {
@@ -882,7 +1004,7 @@ async function run(jobId: string) {
           cafeId,
           keywords,
           // Candidate cap per cafe (keep stable even with many keywords).
-          alreadyEnough ? 1 : Math.min(200, Math.max(40, Math.ceil(job.maxPosts * 4)))
+          alreadyEnough ? 1 : Math.min(120, Math.max(30, Math.ceil(job.maxPosts * 6)))
         );
 
         // Requirement: search each keyword once per selected cafe.
@@ -892,8 +1014,15 @@ async function run(jobId: string) {
           continue;
         }
 
+        let parseAttempts = 0;
+        const parseBudget = Math.max(20, job.maxPosts * 8);
+
         for (const cand of candidates) {
           if (collected.length >= job.maxPosts) break;
+          if (parseAttempts >= parseBudget) {
+            console.log(`[run] parseBudget reached cafe=${cafeId} budget=${parseBudget}`);
+            break;
+          }
 
           // Fast date filter from search API (more reliable than DOM parsing).
           if (job.fromDate && cand.addedAt && cand.addedAt < job.fromDate) continue;
@@ -903,29 +1032,28 @@ async function run(jobId: string) {
           if (job.minViewCount !== null && cand.readCount < job.minViewCount) continue;
           if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) continue;
 
-        const parsed = await withTimeout(
-          parsePost(page, cand.url, cafeId, cafeNumericId, cafeName, cand.subject),
-          90000,
-          "parsePost overall"
-        ).catch(() => null);
-        if (!parsed) continue;
+          parseAttempts += 1;
+          const parsed = await withTimeout(
+            parsePost(page, cand.url, cafeId, cafeNumericId, cafeName, cand.subject),
+            90000,
+            "parsePost overall"
+          ).catch(() => null);
+          if (!parsed) continue;
 
-        // Keyword relevance check (defensive):
-        // Even though candidates come from the keyword search API, we verify the keyword is present in
-        // the extracted body/title to avoid unrelated posts slipping in due to UI text or API quirks.
-        const normalizedForKeywordCheck = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
-        if (!includesKeyword(normalizedForKeywordCheck, cand.queryKeyword)) {
-          console.log(
-            `[filter] drop keyword_miss kw=${cand.queryKeyword} url=${cand.url} title=${(parsed.title || "").slice(0, 60)}`
-          );
-          continue;
-        }
+          // Keyword relevance check (defensive).
+          const normalizedForKeywordCheck = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
+          if (!includesKeyword(normalizedForKeywordCheck, cand.queryKeyword)) {
+            console.log(
+              `[filter] drop keyword_miss kw=${cand.queryKeyword} url=${cand.url} title=${(parsed.title || "").slice(0, 60)}`
+            );
+            continue;
+          }
 
-        // Use counts from the search API list (more reliable than page text parsing).
-        parsed.viewCount = cand.readCount;
-        parsed.likeCount = cand.likeCount;
-        parsed.commentCount = cand.commentCount;
-        parsed.publishedAt = cand.addedAt;
+          // Use counts from the search API list (more reliable than page text parsing).
+          parsed.viewCount = cand.readCount;
+          parsed.likeCount = cand.likeCount;
+          parsed.commentCount = cand.commentCount;
+          parsed.publishedAt = cand.addedAt;
 
           if (!parsed.title || parsed.title.trim().length < 2) {
             parsed.title = cand.subject || parsed.title;
