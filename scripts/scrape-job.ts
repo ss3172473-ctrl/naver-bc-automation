@@ -553,11 +553,16 @@ async function run(jobId: string) {
         parsed.likeCount = cand.likeCount;
         parsed.commentCount = cand.commentCount;
 
-        const normalizedForMatch = `${parsed.title}\n${parsed.contentText}`;
-        if (!matchesAnyKeyword(normalizedForMatch, keywords)) {
-          continue;
+        // Candidate list already comes from Naver's keyword search API.
+        // Re-checking keywords against parsed DOM text can incorrectly drop valid results
+        // (e.g., when the extracted title is missing or UI text dominates).
+        // Keep include/exclude word filters only.
+        if (!parsed.title || parsed.title.trim().length < 2) {
+          parsed.title = cand.subject || parsed.title;
         }
-        if (!isAllowedByWords(normalizedForMatch, includeWords, excludeWords)) {
+
+        const normalizedForFilter = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
+        if (!isAllowedByWords(normalizedForFilter, includeWords, excludeWords)) {
           continue;
         }
 
