@@ -14,12 +14,25 @@ function extractCafeId(url: string): string | null {
     if (parsed.hostname !== "cafe.naver.com") return null;
     const pathname = parsed.pathname.replace(/^\//, "").trim();
     if (!pathname || pathname.toLowerCase().includes("article")) return null;
+
+    // New cafe URLs often look like /ca-fe/cafes/<clubId>
+    const m = pathname.match(/^ca-fe\/cafes\/(\d+)(?:\/.*)?$/i);
+    if (m?.[1]) return m[1];
+
+    // Old cafe URLs look like /<cafeId>
     if (pathname.includes("/")) return null;
     if (pathname === "mycafelist.nhn") return null;
     return pathname;
   } catch {
     return null;
   }
+}
+
+function toCafeUrl(cafeIdOrClubId: string): string {
+  if (/^\d+$/.test(cafeIdOrClubId)) {
+    return `https://cafe.naver.com/ca-fe/cafes/${cafeIdOrClubId}`;
+  }
+  return `https://cafe.naver.com/${cafeIdOrClubId}`;
 }
 
 async function loadStorageStateFromDb(): Promise<any> {
@@ -70,7 +83,7 @@ async function fetchJoinedCafes(storageState: any): Promise<JoinedCafe[]> {
         unique.set(cafeId, {
           cafeId,
           name: item.name || cafeId,
-          url: `https://cafe.naver.com/${cafeId}`,
+          url: toCafeUrl(cafeId),
         });
       }
     }
@@ -106,4 +119,3 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
-

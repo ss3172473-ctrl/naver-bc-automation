@@ -209,6 +209,9 @@ function clampByAutoThreshold(posts: ParsedPost[], useAutoFilter: boolean, minVi
 }
 
 function getCafeUrl(cafeId: string): string {
+  if (/^\d+$/.test(cafeId)) {
+    return `https://cafe.naver.com/ca-fe/cafes/${cafeId}`;
+  }
   return `https://cafe.naver.com/${cafeId}`;
 }
 
@@ -222,6 +225,11 @@ function getArticleFrame(page: Page): Frame | Page {
 }
 
 async function getClubId(page: Page, cafeId: string): Promise<string> {
+  // If the "cafeId" is already numeric, treat it as clubId.
+  if (/^\d+$/.test(cafeId)) {
+    return cafeId;
+  }
+
   // Use desktop cafe home because we will scrape desktop pages.
   await page.goto(getCafeUrl(cafeId), { waitUntil: "domcontentloaded", timeout: 35000 });
   await sleep(1200);
