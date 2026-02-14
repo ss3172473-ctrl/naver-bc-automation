@@ -353,7 +353,13 @@ async function collectArticleCandidates(
   return { cafeNumericId, candidates };
 }
 
-async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName: string): Promise<ParsedPost | null> {
+async function parsePost(
+  page: Page,
+  sourceUrl: string,
+  cafeId: string,
+  cafeName: string,
+  fallbackTitle: string
+): Promise<ParsedPost | null> {
   console.log(`[parse] ${sourceUrl}`);
   await withTimeout(
     page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 35000 }),
@@ -393,9 +399,9 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     console.log("[parse] expectedArticleId missing; using heuristic frame");
   }
 
-  const title =
-    (await frame.locator(".title_text, h3, h2").first().textContent().catch(() => null))?.trim() ||
-    (await page.title());
+  // User request: we mainly need full page text. Title/author/date are optional metadata.
+  // Use the search API subject as the title to avoid DOM selector fragility.
+  const title = (fallbackTitle || "").trim() || (await page.title());
 
   // Expand common "더보기/펼치기" UI so long posts aren't truncated in innerText.
   // This is not a bypass; it's the same action a user would do before copy/paste.
@@ -430,13 +436,9 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
   // can cause timeouts; skip it to improve reliability.
   const rawHtml: string | null = null;
 
-  const authorName =
-    (await frame.locator(".nickname, .nick, .author, .name").first().textContent().catch(() => null))?.trim() ||
-    "";
-
-  const publishedAttr = await frame.locator("time").first().getAttribute("datetime").catch(() => null);
-  const publishedText = (await frame.locator("time").first().textContent().catch(() => null)) || null;
-  const publishedAt = toDateSafe(publishedAttr || publishedText);
+  // Skip author/date parsing (unstable selectors; not needed for the user's sheet workflow).
+  const authorName = "";
+  const publishedAt = null;
 
   // User request: store only post page full text. Do not parse/store comments in Sheets.
   const comments: ParsedComment[] = [];
@@ -550,7 +552,7 @@ async function run(jobId: string) {
         if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) continue;
 
         const parsed = await withTimeout(
-          parsePost(page, cand.url, cafeId, cafeName),
+          parsePost(page, cand.url, cafeId, cafeName, cand.subject),
           90000,
           "parsePost overall"
         ).catch(() => null);
