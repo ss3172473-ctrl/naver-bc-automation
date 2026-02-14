@@ -342,6 +342,19 @@ function extractPublishedAtFromText(text: string): Date | null {
   return makeUtcFromKstParts(yyyy, mm, dd, hh, min);
 }
 
+async function extractPublishedAtFromPageTop(target: Frame | Page): Promise<Date | null> {
+  // Some body selectors exclude the header area where the timestamp lives.
+  // Use a cheap heuristic: search only the top part of the page visible text.
+  try {
+    const all = String(await withTimeout((target as any).locator("body").innerText(), 20000, "body innerText")).trim();
+    if (!all) return null;
+    const head = all.slice(0, 3500);
+    return extractPublishedAtFromText(head);
+  } catch {
+    return null;
+  }
+}
+
 function clampByAutoThreshold(posts: ParsedPost[], useAutoFilter: boolean, minView: number | null, minComment: number | null): ParsedPost[] {
   if (!useAutoFilter && minView === null && minComment === null) {
     return posts;
@@ -961,7 +974,11 @@ async function parsePost(
     const rawHtml: string | null = null;
 
     // Derive publishedAt from visible text (works for directUrls too).
-    const publishedAt = extractPublishedAtFromText(bodyText) || null;
+    // First try bodyText (often includes header), then fall back to the page-top text if body container excludes the timestamp.
+    const publishedAt =
+      extractPublishedAtFromText(bodyText) ||
+      (await extractPublishedAtFromPageTop(frame)) ||
+      null;
 
     // Skip author parsing (unstable selectors; not needed for the user's sheet workflow).
     const authorName = "";
