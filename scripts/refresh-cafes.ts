@@ -55,36 +55,47 @@ async function fetchJoinedCafes(storageState: any): Promise<JoinedCafe[]> {
   const page = await context.newPage();
 
   try {
-    await page.goto("https://section.cafe.naver.com/ca-fe/home", {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-    await page.waitForTimeout(1500);
-
-    if (page.url().includes("nidlogin")) {
-      throw new Error("네이버 세션이 만료되었습니다. 대시보드에서 storageState를 다시 업로드하세요.");
-    }
-
-    const anchors = await page.$$eval("a[href*='cafe.naver.com']", (elements) =>
-      elements
-        .map((el) => {
-          const href = (el as HTMLAnchorElement).href || "";
-          const name = (el.textContent || "").trim();
-          return { href, name };
-        })
-        .filter((v) => !!v.href)
-    );
+    // Try the classic "my cafe list" first (usually contains all joined cafes).
+    const candidatePages = [
+      "https://cafe.naver.com/mycafelist.nhn",
+      "https://section.cafe.naver.com/ca-fe/home",
+    ];
 
     const unique = new Map<string, JoinedCafe>();
-    for (const item of anchors) {
-      const cafeId = extractCafeId(item.href);
-      if (!cafeId) continue;
-      if (!unique.has(cafeId)) {
-        unique.set(cafeId, {
-          cafeId,
-          name: item.name || cafeId,
-          url: toCafeUrl(cafeId),
-        });
+
+    for (const target of candidatePages) {
+      await page.goto(target, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(1500);
+
+      if (page.url().includes("nidlogin")) {
+        throw new Error("네이버 세션이 만료되었습니다. 대시보드에서 storageState를 다시 업로드하세요.");
+      }
+
+      const anchors = await page.$$eval("a", (elements) =>
+        elements
+          .map((el) => {
+            const a = el as HTMLAnchorElement;
+            const href = a.href || "";
+            const name = (a.textContent || "").trim();
+            return { href, name };
+          })
+          .filter((v) => v.href.includes("cafe.naver.com"))
+      );
+
+      for (const item of anchors) {
+        const cafeId = extractCafeId(item.href);
+        if (!cafeId) continue;
+        if (!unique.has(cafeId)) {
+          unique.set(cafeId, {
+            cafeId,
+            name: item.name || cafeId,
+            url: toCafeUrl(cafeId),
+          });
+        }
+      }
+
+      if (unique.size >= 5) {
+        break;
       }
     }
 
