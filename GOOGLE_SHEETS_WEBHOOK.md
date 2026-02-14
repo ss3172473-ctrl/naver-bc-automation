@@ -8,17 +8,12 @@ function doPost(e) {
   const body = JSON.parse(e.postData.contents || '{}');
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const postSheet = ss.getSheetByName('posts') || ss.insertSheet('posts');
-  const commentSheet = ss.getSheetByName('comments') || ss.insertSheet('comments');
 
   if (postSheet.getLastRow() === 0) {
     postSheet.appendRow(['jobId','sourceUrl','cafeId','cafeName','cafeUrl','title','authorName','publishedAt','viewCount','likeCount','commentCount','contentText']);
   }
-  if (commentSheet.getLastRow() === 0) {
-    commentSheet.appendRow(['jobId','sourceUrl','cafeId','cafeName','cafeUrl','commentAuthor','commentBody','commentLikeCount','commentWrittenAt']);
-  }
 
   const postRows = Array.isArray(body.postRows) ? body.postRows : [];
-  const commentRows = Array.isArray(body.commentRows) ? body.commentRows : [];
 
   if (postRows.length > 0) {
     const values = postRows.map(r => [
@@ -27,14 +22,6 @@ function doPost(e) {
       Number(r.commentCount || 0), r.contentText || ''
     ]);
     postSheet.getRange(postSheet.getLastRow() + 1, 1, values.length, values[0].length).setValues(values);
-  }
-
-  if (commentRows.length > 0) {
-    const values = commentRows.map(r => [
-      r.jobId || '', r.sourceUrl || '', r.cafeId || '', r.cafeName || '', r.cafeUrl || '',
-      r.commentAuthor || '', r.commentBody || '', Number(r.commentLikeCount || 0), r.commentWrittenAt || ''
-    ]);
-    commentSheet.getRange(commentSheet.getLastRow() + 1, 1, values.length, values[0].length).setValues(values);
   }
 
   return ContentService.createTextOutput(JSON.stringify({ success: true }))

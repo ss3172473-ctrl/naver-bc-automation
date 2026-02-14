@@ -346,7 +346,25 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     throw new Error("네이버 로그인 세션이 만료되었습니다.");
   }
 
-  const frame = getArticleFrame(page);
+  // Naver cafe PC pages can nest the real content inside a frame/iframe.
+  // To avoid missing the body (본문이 비어보이는 문제), pick the frame with the largest body text.
+  const candidateFrames: Array<Frame | Page> = [page, ...page.frames()];
+
+  const frameTexts: Array<{ target: Frame | Page; text: string; len: number }> = [];
+  for (const target of candidateFrames) {
+    const url = "url" in target ? target.url() : "";
+    if (url.startsWith("about:") || url.trim() === "") continue;
+    const text = await withTimeout(
+      target.locator("body").innerText().catch(() => ""),
+      12000,
+      `body innerText (${url.slice(0, 80)})`
+    ).catch(() => "");
+    const trimmed = (text || "").trim();
+    if (trimmed) frameTexts.push({ target, text: trimmed, len: trimmed.length });
+  }
+
+  const best = frameTexts.sort((a, b) => b.len - a.len)[0];
+  const frame = best?.target || getArticleFrame(page);
 
   const title =
     (await frame.locator(".title_text, h3, h2").first().textContent().catch(() => null))?.trim() ||
@@ -360,17 +378,12 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     const count = await candidates.count().catch(() => 0);
     if (count === 0) break;
 
-    // Click a few visible candidates (some pages have multiple "more" buttons).
     const clicks = Math.min(count, 6);
     for (let i = 0; i < clicks; i += 1) {
-      await candidates
-        .nth(i)
-        .click({ timeout: 1500 })
-        .catch(() => undefined);
+      await candidates.nth(i).click({ timeout: 1500 }).catch(() => undefined);
       await sleep(200);
     }
 
-    // Scroll to trigger lazy-rendered content/comments.
     await frame
       .evaluate(() => {
         window.scrollTo(0, document.body.scrollHeight);
@@ -379,23 +392,12 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     await sleep(400);
   }
 
-  // User-requested mode: store all visible text on the page as-is (no cleaning/segmentation).
-  // On desktop cafe, content is often inside the cafe_main frame; use it as the copy-source.
   const pageText = (await withTimeout(frame.locator("body").innerText(), 25000, "body innerText")).trim();
   if (!pageText) return null;
-
-  if (looksLikeJoinWall(pageText)) {
-    // If the user can't see it (membership wall), don't archive the wall text.
-    return null;
-  }
+  if (looksLikeJoinWall(pageText)) return null;
 
   const contentText = pageText;
   const rawHtml = await withTimeout(frame.locator("body").innerHTML(), 20000, "body innerHTML");
-
-  const fullText = pageText;
-  const viewMatch = fullText.match(/조회\s*([\d,]+)/);
-  const likeMatch = fullText.match(/좋아요\s*([\d,]+)/);
-  const commentMatch = fullText.match(/댓글\s*([\d,]+)/);
 
   const authorName =
     (await frame.locator(".nickname, .nick, .author, .name").first().textContent().catch(() => null))?.trim() ||
@@ -405,25 +407,8 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
   const publishedText = (await frame.locator("time").first().textContent().catch(() => null)) || null;
   const publishedAt = toDateSafe(publishedAttr || publishedText);
 
-  const comments = await frame.$$eval("[class*='comment'], [id*='comment']", (elements) => {
-    const rows: Array<{ authorName: string; body: string; likeCount: number }> = [];
-
-    for (const el of elements) {
-      const text = (el.textContent || "").trim();
-      if (!text || text.length < 2 || text.length > 800) continue;
-
-      const like = Number((text.match(/좋아요\s*([\d,]+)/)?.[1] || "0").replace(/[^\d]/g, "")) || 0;
-      rows.push({
-        authorName: "",
-        body: text,
-        likeCount: like,
-      });
-
-      if (rows.length >= 200) break;
-    }
-
-    return rows;
-  }).catch(() => []);
+  // User request: store only post page full text. Do not parse/store comments in Sheets.
+  const comments: ParsedComment[] = [];
 
   return {
     sourceUrl: page.url(),
@@ -433,17 +418,12 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     title: title || "",
     authorName,
     publishedAt,
-    viewCount: asInt(viewMatch?.[1] || "0"),
-    likeCount: asInt(likeMatch?.[1] || "0"),
-    commentCount: asInt(commentMatch?.[1] || "0"),
+    viewCount: 0,
+    likeCount: 0,
+    commentCount: 0,
     contentText,
     rawHtml,
-    comments: comments.map((comment) => ({
-      authorName: comment.authorName,
-      body: comment.body,
-      likeCount: comment.likeCount,
-      writtenAt: null,
-    })),
+    comments,
   };
 }
 
@@ -541,6 +521,11 @@ async function run(jobId: string) {
         const parsed = await parsePost(page, cand.url, cafeId, cafeName).catch(() => null);
         if (!parsed) continue;
 
+        // Use counts from the search API list (more reliable than page text parsing).
+        parsed.viewCount = cand.readCount;
+        parsed.likeCount = cand.likeCount;
+        parsed.commentCount = cand.commentCount;
+
         const normalizedForMatch = `${parsed.title}\n${parsed.contentText}`;
         if (!matchesAnyKeyword(normalizedForMatch, keywords)) {
           continue;
@@ -591,17 +576,7 @@ async function run(jobId: string) {
     commentCount: number;
     contentText: string;
   }>;
-  const commentRows = [] as Array<{
-    jobId: string;
-    sourceUrl: string;
-    cafeId: string;
-    cafeName: string;
-    cafeUrl: string;
-    commentAuthor: string;
-    commentBody: string;
-    commentLikeCount: number;
-    commentWrittenAt: string;
-  }>;
+  const commentRows = [] as Array<any>;
 
   for (const post of finalPosts) {
     const hash = contentHash(post.contentText);
@@ -627,29 +602,7 @@ async function run(jobId: string) {
       },
     });
 
-    for (const comment of post.comments) {
-      await prisma.scrapeComment.create({
-        data: {
-          postId: created.id,
-          authorName: comment.authorName,
-          body: comment.body,
-          likeCount: comment.likeCount,
-          writtenAt: comment.writtenAt,
-        },
-      });
-
-      commentRows.push({
-        jobId,
-        sourceUrl: post.sourceUrl,
-        cafeId: post.cafeId,
-        cafeName: post.cafeName,
-        cafeUrl: post.cafeUrl,
-        commentAuthor: comment.authorName,
-        commentBody: comment.body,
-        commentLikeCount: comment.likeCount,
-        commentWrittenAt: comment.writtenAt?.toISOString() || "",
-      });
-    }
+    // comments disabled by user request
 
     postRows.push({
       jobId,

@@ -47,15 +47,12 @@ export async function sendRowsToGoogleSheet(
     ...r,
     contentText: clampForSheetCell(r.contentText),
   }));
-  const safeCommentRows = commentRows.map((r) => ({
-    ...r,
-    commentBody: clampForSheetCell(r.commentBody, 20000),
-  }));
 
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ postRows: safePostRows, commentRows: safeCommentRows }),
+    // User request: write only to "posts" sheet. Do not send commentRows.
+    body: JSON.stringify({ postRows: safePostRows }),
   });
 
   if (!response.ok) {
