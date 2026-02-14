@@ -55,14 +55,55 @@ export default function DashboardPage() {
   const [keywords, setKeywords] = useState("");
   const [includeKeywordsText, setIncludeKeywordsText] = useState("");
   const [excludeKeywordsText, setExcludeKeywordsText] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [datePreset, setDatePreset] = useState<"1m" | "3m" | "6m" | "1y" | "2y" | "all">("3m");
   const [minViewCount, setMinViewCount] = useState("");
   const [minCommentCount, setMinCommentCount] = useState("");
   const [useAutoFilter, setUseAutoFilter] = useState(true);
   const [maxPosts, setMaxPosts] = useState(80);
   const [creating, setCreating] = useState(false);
   const [startingJobId, setStartingJobId] = useState<string | null>(null);
+
+  const keywordCount = useMemo(() => {
+    const list = keywords
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    return list.length;
+  }, [keywords]);
+
+  const recommendedMaxPosts = useMemo(() => {
+    // Practical default: keep jobs reasonably small to avoid timeouts / rate-limit.
+    // Users can raise it, but we show a safe recommendation.
+    if (selectedCafeIds.length === 0) return 80;
+    if (keywordCount >= 200) return 30;
+    if (keywordCount >= 80) return 50;
+    if (keywordCount >= 30) return 60;
+    return 80;
+  }, [keywordCount, selectedCafeIds.length]);
+
+  const computeDateRange = useCallback(
+    (preset: "1m" | "3m" | "6m" | "1y" | "2y" | "all") => {
+      if (preset === "all") return { fromDate: null as string | null, toDate: null as string | null };
+      const now = new Date();
+      const to = new Date(now);
+      const from = new Date(now);
+      if (preset === "1m") from.setMonth(from.getMonth() - 1);
+      if (preset === "3m") from.setMonth(from.getMonth() - 3);
+      if (preset === "6m") from.setMonth(from.getMonth() - 6);
+      if (preset === "1y") from.setFullYear(from.getFullYear() - 1);
+      if (preset === "2y") from.setFullYear(from.getFullYear() - 2);
+
+      const asYmd = (d: Date) => {
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        return `${yyyy}-${mm}-${dd}`;
+      };
+
+      return { fromDate: asYmd(from), toDate: asYmd(to) };
+    },
+    []
+  );
 
   const selectedCafes = useMemo(
     () => cafes.filter((cafe) => selectedCafeIds.includes(cafe.cafeId)),
@@ -190,6 +231,7 @@ export default function DashboardPage() {
 
     try {
       setCreating(true);
+      const { fromDate, toDate } = computeDateRange(datePreset);
       const res = await fetch("/api/scrape-jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -197,8 +239,8 @@ export default function DashboardPage() {
           keywords,
           includeKeywords: includeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
           excludeKeywords: excludeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
-          fromDate: fromDate || null,
-          toDate: toDate || null,
+          fromDate,
+          toDate,
           minViewCount: minViewCount === "" ? null : Number(minViewCount),
           minCommentCount: minCommentCount === "" ? null : Number(minCommentCount),
           useAutoFilter,
@@ -309,7 +351,13 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
               <label className="text-sm text-slate-700">키워드 목록 (쉼표 구분, 공백 자동 제거)</label>
-              <input value={keywords} onChange={(e) => setKeywords(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="공구,미개봉,한정판" />
+              <textarea
+                value={keywords}
+                onChange={(e) => setKeywords(e.target.value)}
+                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg min-h-[88px]"
+                placeholder="공구,미개봉,한정판"
+              />
+              <div className="mt-1 text-xs text-slate-600">키워드 개수: {keywordCount}개</div>
             </div>
 
             <div>
@@ -333,18 +381,34 @@ export default function DashboardPage() {
             </div>
 
             <div>
-              <label className="text-sm text-slate-700">시작일</label>
-              <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
-            </div>
-
-            <div>
-              <label className="text-sm text-slate-700">종료일</label>
-              <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+              <label className="text-sm text-slate-700">기간</label>
+              <select
+                value={datePreset}
+                onChange={(e) => setDatePreset(e.target.value as any)}
+                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg bg-white"
+              >
+                <option value="1m">최근 1개월</option>
+                <option value="3m">최근 3개월</option>
+                <option value="6m">최근 6개월</option>
+                <option value="1y">최근 1년</option>
+                <option value="2y">최근 2년</option>
+                <option value="all">전체 (기간 제한 없음)</option>
+              </select>
+              <div className="mt-1 text-xs text-slate-600">
+                {(() => {
+                  const r = computeDateRange(datePreset);
+                  if (!r.fromDate || !r.toDate) return "기간 제한 없음";
+                  return `${r.fromDate} ~ ${r.toDate}`;
+                })()}
+              </div>
             </div>
 
             <div>
               <label className="text-sm text-slate-700">최대 수집 글 수</label>
               <input type="number" min={1} max={300} value={maxPosts} onChange={(e) => setMaxPosts(Number(e.target.value) || 80)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+              <div className="mt-1 text-xs text-slate-600">
+                권장: {recommendedMaxPosts} (절대 상한: 300). 키워드/카페가 많으면 낮게 잡는 게 안정적입니다.
+              </div>
             </div>
 
             <div className="flex items-center gap-2 mt-7">

@@ -43,6 +43,7 @@ type ArticleCandidate = {
   commentCount: number;
   likeCount: number;
   boardType: string;
+  addedAt: Date | null;
 };
 
 const prisma = new PrismaClient();
@@ -364,6 +365,9 @@ async function fetchCandidatesFromSearchApi(
 
     // Search API subjects can contain highlight markup like <em>...</em>.
     const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
+    const addedAt = item.addDate ? new Date(String(item.addDate)) : null;
+    const addedAtSafe =
+      addedAt && !Number.isNaN(addedAt.getTime()) ? addedAt : null;
 
     rows.push({
       articleId: Number(item.articleId),
@@ -377,6 +381,7 @@ async function fetchCandidatesFromSearchApi(
       commentCount: Number(item.commentCount || 0),
       likeCount: Number(item.likeItCount || 0),
       boardType: String(item.boardType || "L"),
+      addedAt: addedAtSafe,
     });
   }
 
@@ -394,22 +399,25 @@ async function collectArticleCandidates(
   const cafeNumericId = await getClubId(page, cafeId);
   console.log(`[cafe] cafeId=${cafeId} cafeNumericId=${cafeNumericId}`);
 
+  // Requirement: for each selected cafe, search each keyword at least once.
+  // To keep the Worker stable even with huge keyword lists, we only call the search API once per keyword (page=1).
+  // We still cap how many candidates we keep in memory, but we do not skip the search calls.
+  const perKeywordTake = Math.min(20, Math.max(1, Math.floor(maxUrls / Math.max(1, keywords.length))));
+
   for (const keyword of keywords) {
     console.log(`[collect] cafe=${cafeId} keyword=${keyword}`);
-    for (let pageNum = 1; pageNum <= 5 && candidates.length < maxUrls; pageNum += 1) {
-      const rows = await fetchCandidatesFromSearchApi(page, cafeNumericId, keyword, pageNum);
-      if (rows.length === 0) break;
-
-      for (const row of rows) {
-        if (seen.has(row.articleId)) continue;
-        seen.add(row.articleId);
+    const rows = await fetchCandidatesFromSearchApi(page, cafeNumericId, keyword, 1).catch(() => []);
+    const take = Math.max(1, Math.min(perKeywordTake, rows.length));
+    for (let i = 0; i < take; i += 1) {
+      const row = rows[i];
+      if (!row) continue;
+      if (seen.has(row.articleId)) continue;
+      seen.add(row.articleId);
+      if (candidates.length < maxUrls) {
         candidates.push(row);
-        if (candidates.length >= maxUrls) break;
       }
     }
-
-    if (candidates.length >= maxUrls) break;
-    await sleep(250);
+    await sleep(180);
   }
 
   console.log(`[collect] cafe=${cafeId} candidates=${candidates.length}`);
@@ -612,11 +620,16 @@ async function run(jobId: string) {
         page,
         cafeId,
         keywords,
-        Math.max(10, Math.ceil(job.maxPosts / Math.max(1, cafeIds.length)))
+        // Candidate cap per cafe (keep stable even with many keywords).
+        Math.min(200, Math.max(40, Math.ceil(job.maxPosts * 4)))
       );
 
       for (const cand of candidates) {
         if (collected.length >= job.maxPosts) break;
+
+        // Fast date filter from search API (more reliable than DOM parsing).
+        if (job.fromDate && cand.addedAt && cand.addedAt < job.fromDate) continue;
+        if (job.toDate && cand.addedAt && cand.addedAt > job.toDate) continue;
 
         // Early filter by counts from list API (fast).
         if (job.minViewCount !== null && cand.readCount < job.minViewCount) continue;
@@ -633,6 +646,7 @@ async function run(jobId: string) {
         parsed.viewCount = cand.readCount;
         parsed.likeCount = cand.likeCount;
         parsed.commentCount = cand.commentCount;
+        parsed.publishedAt = cand.addedAt;
 
         // Candidate list already comes from Naver's keyword search API.
         // Re-checking keywords against parsed DOM text can incorrectly drop valid results
