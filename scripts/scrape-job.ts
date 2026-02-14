@@ -616,13 +616,21 @@ async function run(jobId: string) {
       const cafeId = cafeIds[i];
       const cafeName = cafeNames[i] || cafeId;
 
+      const alreadyEnough = collected.length >= job.maxPosts;
       const { cafeNumericId, candidates } = await collectArticleCandidates(
         page,
         cafeId,
         keywords,
         // Candidate cap per cafe (keep stable even with many keywords).
-        Math.min(200, Math.max(40, Math.ceil(job.maxPosts * 4)))
+        alreadyEnough ? 1 : Math.min(200, Math.max(40, Math.ceil(job.maxPosts * 4)))
       );
+
+      // Requirement: search each keyword once per selected cafe.
+      // Even if we've already collected enough posts, we still execute the keyword search pass above.
+      if (alreadyEnough) {
+        console.log(`[run] maxPosts reached; skipping parse for cafe=${cafeId} (search pass done)`);
+        continue;
+      }
 
       for (const cand of candidates) {
         if (collected.length >= job.maxPosts) break;
@@ -667,8 +675,6 @@ async function run(jobId: string) {
         collected.push(parsed);
         await sleep(900 + Math.floor(Math.random() * 600));
       }
-
-      if (collected.length >= job.maxPosts) break;
     }
   } finally {
     console.log(`[run] collected=${collected.length} (before close)`);
