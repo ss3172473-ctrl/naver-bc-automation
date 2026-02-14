@@ -339,8 +339,13 @@ async function collectArticleCandidates(
 
 async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName: string): Promise<ParsedPost | null> {
   console.log(`[parse] ${sourceUrl}`);
-  await page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+  await withTimeout(
+    page.goto(sourceUrl, { waitUntil: "domcontentloaded", timeout: 35000 }),
+    45000,
+    "page.goto"
+  );
   await sleep(1200);
+  console.log(`[parse] loaded url=${page.url()}`);
 
   if (page.url().includes("nidlogin")) {
     throw new Error("네이버 로그인 세션이 만료되었습니다.");
@@ -349,6 +354,7 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
   // Naver cafe PC pages can nest the real content inside a frame/iframe.
   // To avoid missing the body (본문이 비어보이는 문제), pick the frame with the largest body text.
   const candidateFrames: Array<Frame | Page> = [page, ...page.frames()];
+  console.log(`[parse] frames=${candidateFrames.length}`);
 
   const frameTexts: Array<{ target: Frame | Page; text: string; len: number }> = [];
   for (const target of candidateFrames) {
@@ -364,6 +370,12 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
   }
 
   const best = frameTexts.sort((a, b) => b.len - a.len)[0];
+  if (best) {
+    const bestUrl = "url" in best.target ? best.target.url() : "";
+    console.log(`[parse] bestFrame len=${best.len} url=${bestUrl}`);
+  } else {
+    console.log("[parse] bestFrame not found; fallback to heuristic frame");
+  }
   const frame = best?.target || getArticleFrame(page);
 
   const title =
@@ -392,11 +404,14 @@ async function parsePost(page: Page, sourceUrl: string, cafeId: string, cafeName
     await sleep(400);
   }
 
+  console.log("[parse] extracting body innerText");
   const pageText = (await withTimeout(frame.locator("body").innerText(), 25000, "body innerText")).trim();
   if (!pageText) return null;
   if (looksLikeJoinWall(pageText)) return null;
 
   const contentText = pageText;
+  console.log(`[parse] extracted text len=${contentText.length}`);
+  console.log("[parse] extracting body innerHTML");
   const rawHtml = await withTimeout(frame.locator("body").innerHTML(), 20000, "body innerHTML");
 
   const authorName =
@@ -518,7 +533,11 @@ async function run(jobId: string) {
         if (job.minViewCount !== null && cand.readCount < job.minViewCount) continue;
         if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) continue;
 
-        const parsed = await parsePost(page, cand.url, cafeId, cafeName).catch(() => null);
+        const parsed = await withTimeout(
+          parsePost(page, cand.url, cafeId, cafeName),
+          90000,
+          "parsePost overall"
+        ).catch(() => null);
         if (!parsed) continue;
 
         // Use counts from the search API list (more reliable than page text parsing).
