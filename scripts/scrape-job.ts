@@ -44,6 +44,7 @@ type ArticleCandidate = {
   likeCount: number;
   boardType: string;
   addedAt: Date | null;
+  queryKeyword: string;
 };
 
 const prisma = new PrismaClient();
@@ -123,6 +124,13 @@ function isAllowedByWords(text: string, includeWords: string[], excludeWords: st
 function matchesAnyKeyword(text: string, keywords: string[]): boolean {
   const compact = text.replace(/\s+/g, "").toLowerCase();
   return keywords.some((kw) => compact.includes(kw.replace(/\s+/g, "").toLowerCase()));
+}
+
+function includesKeyword(text: string, keyword: string): boolean {
+  const compact = String(text || "").replace(/\s+/g, "").toLowerCase();
+  const kw = String(keyword || "").replace(/\s+/g, "").toLowerCase();
+  if (!kw) return true;
+  return compact.includes(kw);
 }
 
 function looksLikeJoinWall(text: string): boolean {
@@ -565,6 +573,7 @@ async function fetchCandidatesFromSearchApi(
       likeCount: Number(item.likeItCount || 0),
       boardType: String(item.boardType || "L"),
       addedAt: addedAtSafe,
+      queryKeyword: keyword,
     });
   }
 
@@ -874,18 +883,29 @@ async function run(jobId: string) {
           if (job.minViewCount !== null && cand.readCount < job.minViewCount) continue;
           if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) continue;
 
-          const parsed = await withTimeout(
-            parsePost(page, cand.url, cafeId, cafeNumericId, cafeName, cand.subject),
-            90000,
-            "parsePost overall"
-          ).catch(() => null);
-          if (!parsed) continue;
+        const parsed = await withTimeout(
+          parsePost(page, cand.url, cafeId, cafeNumericId, cafeName, cand.subject),
+          90000,
+          "parsePost overall"
+        ).catch(() => null);
+        if (!parsed) continue;
 
-          // Use counts from the search API list (more reliable than page text parsing).
-          parsed.viewCount = cand.readCount;
-          parsed.likeCount = cand.likeCount;
-          parsed.commentCount = cand.commentCount;
-          parsed.publishedAt = cand.addedAt;
+        // Keyword relevance check (defensive):
+        // Even though candidates come from the keyword search API, we verify the keyword is present in
+        // the extracted body/title to avoid unrelated posts slipping in due to UI text or API quirks.
+        const normalizedForKeywordCheck = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
+        if (!includesKeyword(normalizedForKeywordCheck, cand.queryKeyword)) {
+          console.log(
+            `[filter] drop keyword_miss kw=${cand.queryKeyword} url=${cand.url} title=${(parsed.title || "").slice(0, 60)}`
+          );
+          continue;
+        }
+
+        // Use counts from the search API list (more reliable than page text parsing).
+        parsed.viewCount = cand.readCount;
+        parsed.likeCount = cand.likeCount;
+        parsed.commentCount = cand.commentCount;
+        parsed.publishedAt = cand.addedAt;
 
           if (!parsed.title || parsed.title.trim().length < 2) {
             parsed.title = cand.subject || parsed.title;
