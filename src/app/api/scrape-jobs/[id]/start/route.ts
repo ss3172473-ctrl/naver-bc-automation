@@ -26,7 +26,10 @@ export async function POST(
 
   const { id } = await params;
 
-  const job = await prisma.scrapeJob.findUnique({ where: { id } });
+  const job = await prisma.scrapeJob.findUnique({
+    where: { id },
+    select: { id: true, status: true },
+  });
   if (!job) {
     return NextResponse.json(
       { success: false, error: "작업을 찾을 수 없습니다." },

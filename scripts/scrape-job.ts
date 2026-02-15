@@ -1377,8 +1377,98 @@ function writeCsv(jobId: string, posts: ParsedPost[]): string {
   return filePath;
 }
 
+type ScrapeJobForRun = {
+  id: string;
+  notifyChatId: string | null;
+  keywords: string;
+  directUrls: string | null;
+  includeWords: string | null;
+  excludeWords: string | null;
+  excludeBoards: string | null;
+  cafeIds: string;
+  cafeNames: string | null;
+  fromDate: Date | null;
+  toDate: Date | null;
+  minViewCount: number | null;
+  minCommentCount: number | null;
+  useAutoFilter: boolean;
+  maxPosts: number;
+  status: string;
+  errorMessage: string | null;
+};
+
+async function loadJob(jobId: string): Promise<ScrapeJobForRun> {
+  try {
+    const jobWithExcludeBoards = await prisma.scrapeJob.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        notifyChatId: true,
+        keywords: true,
+        directUrls: true,
+        includeWords: true,
+        excludeWords: true,
+        excludeBoards: true,
+        cafeIds: true,
+        cafeNames: true,
+        fromDate: true,
+        toDate: true,
+        minViewCount: true,
+        minCommentCount: true,
+        useAutoFilter: true,
+        maxPosts: true,
+        status: true,
+        errorMessage: true,
+      },
+    });
+
+    if (!jobWithExcludeBoards) {
+      throw new Error("작업을 찾을 수 없습니다.");
+    }
+
+    return jobWithExcludeBoards as ScrapeJobForRun;
+  } catch (error: any) {
+    // Backward compatibility: old DB without excludeBoards column.
+    const code = error?.code;
+    if (code !== "P2022" && typeof code !== "string") {
+      throw error;
+    }
+
+    const jobWithoutExcludeBoards = await prisma.scrapeJob.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        notifyChatId: true,
+        keywords: true,
+        directUrls: true,
+        includeWords: true,
+        excludeWords: true,
+        cafeIds: true,
+        cafeNames: true,
+        fromDate: true,
+        toDate: true,
+        minViewCount: true,
+        minCommentCount: true,
+        useAutoFilter: true,
+        maxPosts: true,
+        status: true,
+        errorMessage: true,
+      },
+    });
+
+    if (!jobWithoutExcludeBoards) {
+      throw new Error("작업을 찾을 수 없습니다.");
+    }
+
+    return {
+      ...(jobWithoutExcludeBoards as Omit<ScrapeJobForRun, "excludeBoards">),
+      excludeBoards: null,
+    };
+  }
+}
+
 async function run(jobId: string) {
-  const job = await prisma.scrapeJob.findUnique({ where: { id: jobId } });
+  const job = await loadJob(jobId);
   if (!job) throw new Error("작업이 존재하지 않습니다.");
   const storageState = await loadStorageState();
 

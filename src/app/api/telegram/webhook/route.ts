@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { telegramSendMessage } from "@/lib/telegram";
+import { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
 
@@ -19,6 +20,16 @@ function parseAllowedChatIds(): Set<string> {
       .map((v) => v.trim())
       .filter(Boolean)
   );
+}
+
+function isExcludeBoardsSchemaMismatch(error: unknown): boolean {
+  const raw = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: string } | undefined)?.code;
+  const normalized = raw.toLowerCase();
+  if (code === "P2022" && normalized.includes("column") && normalized.includes("does not exist")) {
+    return normalized.includes("excludeboards");
+  }
+  return false;
 }
 
 function isAllowedChatId(chatId: string): boolean {
@@ -121,24 +132,37 @@ async function handleScrape(chatId: string, rest: string) {
   });
   const cafeNames = cafeIds.map((id) => memberships.find((m) => m.cafeId === id)?.name || id);
 
-  const job = await prisma.scrapeJob.create({
-    data: {
-      createdBy: `telegram:${chatId}`,
-      jobType: "SCRAPE",
-      status: "QUEUED",
-      notifyChatId: chatId,
-      keywords: JSON.stringify(keywords),
-      includeWords: JSON.stringify([]),
-      excludeWords: JSON.stringify([]),
-      excludeBoards: JSON.stringify(excludeBoards),
-      minViewCount,
-      minCommentCount,
-      useAutoFilter,
-      maxPosts,
-      cafeIds: JSON.stringify(cafeIds),
-      cafeNames: JSON.stringify(cafeNames),
-    },
-  });
+  const baseData: Prisma.ScrapeJobCreateInput = {
+    createdBy: `telegram:${chatId}`,
+    jobType: "SCRAPE",
+    status: "QUEUED",
+    notifyChatId: chatId,
+    keywords: JSON.stringify(keywords),
+    includeWords: JSON.stringify([]),
+    excludeWords: JSON.stringify([]),
+    minViewCount,
+    minCommentCount,
+    useAutoFilter,
+    maxPosts,
+    cafeIds: JSON.stringify(cafeIds),
+    cafeNames: JSON.stringify(cafeNames),
+  };
+
+  let job;
+  try {
+    job = await prisma.scrapeJob.create({
+      data: {
+        ...baseData,
+        excludeBoards: JSON.stringify(excludeBoards),
+      },
+    });
+  } catch (error) {
+    if (isExcludeBoardsSchemaMismatch(error)) {
+      job = await prisma.scrapeJob.create({ data: baseData });
+    } else {
+      throw error;
+    }
+  }
 
   await telegramSendMessage(
     chatId,

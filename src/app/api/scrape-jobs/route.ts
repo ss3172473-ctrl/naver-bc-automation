@@ -1,8 +1,80 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
+import { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
+
+let cacheScrapeJobExcludeBoards: boolean | null = null;
+
+async function hasScrapeJobExcludeBoards(): Promise<boolean> {
+  if (cacheScrapeJobExcludeBoards !== null) {
+    return cacheScrapeJobExcludeBoards;
+  }
+
+  try {
+    const row = await prisma.$queryRaw<
+      Array<{ exists: boolean }>
+    >(Prisma.sql`SELECT EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND LOWER(table_name) = LOWER('ScrapeJob')
+        AND LOWER(column_name) = LOWER('excludeBoards')
+    ) AS "exists"`);
+
+    const exists = row?.[0]?.exists === true;
+    cacheScrapeJobExcludeBoards = exists;
+    return exists;
+  } catch {
+    cacheScrapeJobExcludeBoards = false;
+    return false;
+  }
+}
+
+function toJobSelect(withExcludeBoards: boolean) {
+  const select: Prisma.ScrapeJobSelect = {
+    id: true,
+    createdBy: true,
+    jobType: true,
+    status: true,
+    notifyChatId: true,
+    keywords: true,
+    directUrls: true,
+    includeWords: true,
+    excludeWords: true,
+    fromDate: true,
+    toDate: true,
+    minViewCount: true,
+    minCommentCount: true,
+    useAutoFilter: true,
+    maxPosts: true,
+    cafeIds: true,
+    cafeNames: true,
+    resultCount: true,
+    sheetSynced: true,
+    resultPath: true,
+    errorMessage: true,
+    startedAt: true,
+    completedAt: true,
+    createdAt: true,
+    updatedAt: true,
+  };
+  if (withExcludeBoards) {
+    select.excludeBoards = true;
+  }
+  return select;
+}
+
+function isExcludeBoardsSchemaMismatch(error: unknown): boolean {
+  const raw = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: string } | undefined)?.code;
+  const normalized = raw.toLowerCase();
+  if (code === "P2022" && normalized.includes("column") && normalized.includes("does not exist")) {
+    return normalized.includes("excludeboards");
+  }
+  return false;
+}
 
 function parseStringList(input: unknown): string[] {
   // Accept both JSON-style arrays and comma-separated strings.
@@ -88,9 +160,11 @@ export async function GET() {
     );
   }
 
+  const withExcludeBoards = await hasScrapeJobExcludeBoards();
   const jobs = await prisma.scrapeJob.findMany({
     orderBy: { createdAt: "desc" },
     take: 30,
+    select: toJobSelect(withExcludeBoards),
   });
 
   return NextResponse.json({ success: true, data: jobs });
@@ -182,25 +256,42 @@ export async function POST(request: NextRequest) {
         ? Math.floor(minCommentCountRaw)
         : null;
 
-    const job = await prisma.scrapeJob.create({
-      data: {
-        createdBy: user.username,
-        status: "QUEUED",
-        keywords: JSON.stringify(keywords),
-        directUrls: directUrls.length ? JSON.stringify(directUrls) : null,
-        includeWords: JSON.stringify(includeKeywords),
-        excludeWords: JSON.stringify(excludeKeywords),
-        excludeBoards: JSON.stringify(excludeBoards),
-        fromDate,
-        toDate,
-        minViewCount,
-        minCommentCount,
-        useAutoFilter,
-        maxPosts,
-        cafeIds: JSON.stringify(cafeIds),
-        cafeNames: JSON.stringify(cafeNames),
-      },
-    });
+    const hasExcludeBoards = await hasScrapeJobExcludeBoards();
+    const baseData: Prisma.ScrapeJobCreateInput = {
+      createdBy: user.username,
+      status: "QUEUED" as const,
+      keywords: JSON.stringify(keywords),
+      directUrls: directUrls.length ? JSON.stringify(directUrls) : null,
+      includeWords: JSON.stringify(includeKeywords),
+      excludeWords: JSON.stringify(excludeKeywords),
+      fromDate,
+      toDate,
+      minViewCount,
+      minCommentCount,
+      useAutoFilter,
+      maxPosts,
+      cafeIds: JSON.stringify(cafeIds),
+      cafeNames: JSON.stringify(cafeNames),
+    };
+    let job;
+    if (hasExcludeBoards) {
+      try {
+        const data: Prisma.ScrapeJobCreateInput = {
+          ...baseData,
+          excludeBoards: JSON.stringify(excludeBoards),
+        };
+        job = await prisma.scrapeJob.create({ data });
+      } catch (error) {
+        if (isExcludeBoardsSchemaMismatch(error)) {
+          cacheScrapeJobExcludeBoards = false;
+          job = await prisma.scrapeJob.create({ data: baseData });
+        } else {
+          throw error;
+        }
+      }
+    } else {
+      job = await prisma.scrapeJob.create({ data: baseData });
+    }
 
     return NextResponse.json({
       success: true,
