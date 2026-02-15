@@ -116,12 +116,13 @@ function buildMatrixRows(job: ScrapeJob, progress: JobProgress | null) {
   );
 
   const currentCollected = Number(progress?.collected || 0);
+  const effectiveCollected = totalCollected > 0 ? totalCollected : currentCollected;
 
   return {
     cafes,
     keywords,
     matrix: progressByCafe,
-    totalCollected,
+    totalCollected: effectiveCollected,
     totalSkipped,
     totalFiltered,
     totalFromJob: currentCollected,
@@ -202,6 +203,27 @@ function formatCellStatus(cell: JobProgressCell | null) {
     return "대기";
   }
   return "진행중";
+}
+
+function normalizeStatus(status: string) {
+  return String(status || "").toUpperCase();
+}
+
+function isProgressActive(progress: JobProgress | null | undefined) {
+  const stage = normalizeStatus(progress?.stage || "");
+  if (!stage) return false;
+  if (stage === "DONE" || stage === "FAILED" || stage === "CANCELLED") return false;
+  return true;
+}
+
+function resolveDisplayStatus(status: string, progress: JobProgress | null) {
+  const key = normalizeStatus(status);
+  const stage = normalizeStatus(progress?.stage || "");
+  if (stage === "DONE") return "SUCCESS";
+  if (stage === "FAILED") return "FAILED";
+  if (stage === "CANCELLED") return "CANCELLED";
+  if (key === "RUNNING" || isProgressActive(progress)) return "RUNNING";
+  return key || "QUEUED";
 }
 
 function shortenCafeName(value: string) {
@@ -322,27 +344,39 @@ export default function DashboardPage() {
 
   const jobStatusSummary = useMemo(() => {
     const total = jobs.length;
-    const queue = jobs.filter((job) => job.status === "QUEUED").length;
-    const running = jobs.filter((job) => job.status === "RUNNING").length;
+    const queue = jobs.filter((job) => {
+      const display = resolveDisplayStatus(job.status, progressByJobId[job.id] || null);
+      return display === "QUEUED";
+    }).length;
+    const running = jobs.filter((job) => {
+      const display = resolveDisplayStatus(job.status, progressByJobId[job.id] || null);
+      return display === "RUNNING";
+    }).length;
     const success = jobs.filter((job) => job.status === "SUCCESS").length;
     const failed = jobs.filter((job) => job.status === "FAILED").length;
     const cancelled = jobs.filter((job) => job.status === "CANCELLED").length;
     return { total, queue, running, success, failed, cancelled };
-  }, [jobs]);
+  }, [jobs, progressByJobId]);
 
-  const activeJobs = useMemo(() => jobs.filter((job) => ["RUNNING", "QUEUED"].includes(job.status)), [jobs]);
+  const activeJobs = useMemo(() => {
+    return jobs.filter((job) => {
+      const display = resolveDisplayStatus(job.status, progressByJobId[job.id] || null);
+      return display === "RUNNING" || display === "QUEUED";
+    });
+  }, [jobs, progressByJobId]);
 
   const getJobUiState = useCallback(
-    (job: ScrapeJob) => {
-      if (job.status === "RUNNING") {
-        if (cancellingJobId === job.id) return { label: "중단 요청 중", disabled: true };
+    (statusKey: string, jobId: string) => {
+      const normalized = normalizeStatus(statusKey);
+      if (normalized === "RUNNING") {
+        if (cancellingJobId === jobId) return { label: "중단 요청 중", disabled: true };
         return { label: "중단", disabled: false };
       }
-      if (job.status === "QUEUED") {
-        if (startingJobId === job.id) return { label: "실행 요청 중", disabled: true };
+      if (normalized === "QUEUED") {
+        if (startingJobId === jobId) return { label: "실행 요청 중", disabled: true };
         return { label: "시작 대기", disabled: false };
       }
-      if (startingJobId === job.id) return { label: "재실행 요청 중", disabled: true };
+      if (startingJobId === jobId) return { label: "재실행 요청 중", disabled: true };
       return { label: "재실행", disabled: false };
     },
     [cancellingJobId, startingJobId]
@@ -365,11 +399,6 @@ export default function DashboardPage() {
       .filter(Boolean);
     return list.length;
   }, [keywords]);
-
-  const keywordList = useMemo(
-    () => keywords.split(",").map((value) => value.trim()).filter(Boolean),
-    [keywords]
-  );
 
   const directUrlCount = useMemo(() => {
     const list = directUrlsText
@@ -719,12 +748,15 @@ export default function DashboardPage() {
   }, [selectedCafeIds, selectedExcludeBoards]);
 
   useEffect(() => {
-    const running = jobs.filter((j) => j.status === "RUNNING");
-    if (running.length === 0) return;
+    const trackedJobs = jobs.filter((j) => {
+      const display = resolveDisplayStatus(j.status, progressByJobId[j.id] || null);
+      return display === "RUNNING" || display === "QUEUED";
+    });
+    if (trackedJobs.length === 0) return;
 
     let alive = true;
     const tick = async () => {
-      for (const j of running) {
+      for (const j of trackedJobs) {
         if (!alive) return;
         await fetchProgress(j.id);
       }
@@ -736,7 +768,7 @@ export default function DashboardPage() {
       alive = false;
       clearInterval(t);
     };
-  }, [jobs, fetchProgress]);
+  }, [jobs, progressByJobId, fetchProgress]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -889,9 +921,11 @@ export default function DashboardPage() {
                 ) : (
                   <div className="space-y-3">
                     {activeJobs.map((job) => {
-                      const isRunning = job.status === "RUNNING";
-                      const p = isRunning ? (progressByJobId[job.id] || null) : null;
-                      const action = getJobUiState(job);
+                      const p = progressByJobId[job.id] || null;
+                      const effectiveStatus = resolveDisplayStatus(job.status, p);
+                      const isRunning = effectiveStatus === "RUNNING";
+                      const action = getJobUiState(effectiveStatus, job.id);
+                      const rawStatus = normalizeStatus(job.status);
                       const progressText = isRunning
                         ? [
                             p?.stage ? `단계: ${getStageLabel(p.stage)}` : "단계: 대기",
@@ -909,25 +943,31 @@ export default function DashboardPage() {
                       const percent = isRunning ? getProgressPercent(p?.stage) : 15;
                       const updatedAt = p?.updatedAt ? formatAgo(p.updatedAt) : "업데이트 없음";
                       const stepIndex = isRunning ? getPipelineIndex(p?.stage) : 1;
-                      const statusKey = String(job.status || "").toUpperCase();
+                      const statusKey = effectiveStatus;
+                      const mismatchStatusDebug = rawStatus !== statusKey ? `서버=${rawStatus} / 진행=${p?.stage || "없음"}` : "";
 
                           const matrixData = isRunning ? buildMatrixRows(job, p) : null;
-                          const matrixText =
-                            matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0
-                              ? `총수집 ${matrixData.totalCollected} / 스킵 ${matrixData.totalSkipped} / 필터 ${matrixData.totalFiltered}`
-                              : "진행 데이터 수집 중";
+                          const hasMatrixGrid = !!(matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0);
+                          const matrixText = hasMatrixGrid
+                            ? `총수집 ${matrixData.totalCollected} / 스킵 ${matrixData.totalSkipped} / 필터 ${matrixData.totalFiltered}`
+                            : `수집 추적 중 (${p?.collected ?? 0}/${job.maxPosts})`;
 
                           return (
                             <div key={job.id} className="border border-slate-200 rounded-lg p-3">
                           <div className="flex flex-wrap items-center gap-2 mb-2">
                             <p className="font-semibold text-black">{new Date(job.createdAt).toLocaleString("ko-KR")}</p>
-                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(job.status)}`}>
+                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(statusKey)}`}>
                               {JOB_STATUS_LABELS[statusKey] || statusKey || "대기"}
                             </span>
                             <span className="text-xs text-slate-600">업데이트: {updatedAt}</span>
                             <span className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-full">
                               {action.label}
                             </span>
+                            {mismatchStatusDebug ? (
+                              <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-1">
+                                상태 진단: {mismatchStatusDebug}
+                              </span>
+                            ) : null}
                             {isRunning ? (
                               <button
                                 onClick={() => cancelJob(job.id)}
@@ -1326,9 +1366,9 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {jobs.map((job) => {
-                    const keywordText = parseJsonList(job.keywords).join(", ");
-                    const cafeText = parseJsonList(job.cafeNames).join(", ");
+                    {jobs.map((job) => {
+                      const keywordText = parseJsonList(job.keywords).join(", ");
+                      const cafeText = parseJsonList(job.cafeNames).join(", ");
                     const filterText = job.useAutoFilter
                       ? "AUTO"
                       : `조회 ${job.minViewCount ?? 0}+ / 댓글 ${job.minCommentCount ?? 0}+`;
@@ -1336,12 +1376,13 @@ export default function DashboardPage() {
                     const boardFilterText =
                       excludedBoards.length > 0 ? ` / 제외게시판 ${excludedBoards.length}개` : "";
 
-                    const p = progressByJobId[job.id] || null;
-                    const runningResult = job.status === "RUNNING" && p
-                      ? `DB ${p?.dbSynced ?? 0} / Sheet ${p?.sheetSynced ?? 0}`
-                      : `DB ${job.resultCount} / Sheet ${job.sheetSynced}`;
-                    const queuedPositionText = (() => {
-                      if (job.status !== "QUEUED") return null;
+                      const p = progressByJobId[job.id] || null;
+                      const displayStatus = resolveDisplayStatus(job.status, p);
+                      const runningResult = displayStatus === "RUNNING" && p
+                        ? `DB ${p?.dbSynced ?? 0} / Sheet ${p?.sheetSynced ?? 0}`
+                        : `DB ${job.resultCount} / Sheet ${job.sheetSynced}`;
+                      const queuedPositionText = (() => {
+                      if (displayStatus !== "QUEUED") return null;
                       const queued = jobs
                         .filter((j) => j.status === "QUEUED")
                         .slice()
@@ -1355,7 +1396,7 @@ export default function DashboardPage() {
                     })();
 
                       const progressText = (() => {
-                        if (job.status === "RUNNING") {
+                        if (displayStatus === "RUNNING") {
                         return [
                           p?.stage ? `단계:${p.stage}` : null,
                           p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
@@ -1367,13 +1408,14 @@ export default function DashboardPage() {
                           typeof p?.collected === "number" ? `수집:${p.collected}` : null,
                         ]
                             .filter(Boolean)
-                            .join(" ");
+                          .join(" ");
                       }
-                        if (job.status === "QUEUED") return queuedPositionText || "-";
+                        if (displayStatus === "QUEUED") return queuedPositionText || "-";
                         return "-";
                       })();
-                      const action = getJobUiState(job);
-                      const jobStatusText = JOB_STATUS_LABELS[String(job.status || "").toUpperCase()] || job.status;
+                      const action = getJobUiState(displayStatus, job.id);
+                      const jobStatusText = JOB_STATUS_LABELS[displayStatus] || displayStatus;
+                      const statusMismatchText = normalizeStatus(job.status) !== displayStatus ? `(진단 ${normalizeStatus(job.status)}->${displayStatus})` : "";
 
                       return (
                         <tr key={job.id} className="border-b border-slate-100">
@@ -1384,12 +1426,15 @@ export default function DashboardPage() {
                         <td className="py-2 max-w-[260px] truncate" title={progressText}>{progressText}</td>
                         <td className="py-2">{runningResult}</td>
                           <td className="py-2">
-                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(job.status)}`}>
+                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(displayStatus)}`}>
                               {jobStatusText}
                             </span>
+                            {statusMismatchText ? (
+                              <span className="text-xs text-amber-700">{statusMismatchText}</span>
+                            ) : null}
                           </td>
                           <td className="py-2">
-                            {job.status === "RUNNING" ? (
+                            {displayStatus === "RUNNING" ? (
                               <button
                                 onClick={() => cancelJob(job.id)}
                                 disabled={action.disabled && cancellingJobId === job.id}
@@ -1397,7 +1442,7 @@ export default function DashboardPage() {
                               >
                                 {action.label}
                               </button>
-                            ) : job.status === "QUEUED" ? (
+                            ) : displayStatus === "QUEUED" ? (
                               <button
                                 onClick={() => cancelJob(job.id)}
                                 disabled={action.disabled && cancellingJobId === job.id}
