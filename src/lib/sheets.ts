@@ -15,18 +15,6 @@ export interface SheetPostPayload {
   contentText: string;
 }
 
-export interface SheetCommentPayload {
-  jobId: string;
-  sourceUrl: string;
-  cafeId: string;
-  cafeName: string;
-  cafeUrl: string;
-  commentAuthor: string;
-  commentBody: string;
-  commentLikeCount: number;
-  commentWrittenAt: string;
-}
-
 // Google Sheets has a per-cell character limit (commonly ~50k). We keep a safety margin
 // to avoid Apps Script setValues failures, while storing the full text in DB/CSV.
 function clampForSheetCell(input: string, maxChars = 45000): string {
@@ -37,8 +25,7 @@ function clampForSheetCell(input: string, maxChars = 45000): string {
 }
 
 export async function sendRowsToGoogleSheet(
-  postRows: SheetPostPayload[],
-  commentRows: SheetCommentPayload[]
+  postRows: SheetPostPayload[]
 ): Promise<void> {
   const endpoint = process.env.GSHEET_WEBHOOK_URL;
   if (!endpoint) {
@@ -47,17 +34,16 @@ export async function sendRowsToGoogleSheet(
 
   const safePostRows = postRows.map((r) => ({
     ...r,
-    bodyText: clampForSheetCell((r as any).bodyText || ""),
-    commentsText: clampForSheetCell((r as any).commentsText || ""),
+    bodyText: clampForSheetCell(r.bodyText || ""),
+    commentsText: clampForSheetCell(r.commentsText || ""),
     contentText: clampForSheetCell(r.contentText),
   }));
 
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // User request: write only to posts sheet(s). Do not send commentRows.
-    // We keep backward compat ("postRows") but also send v2 rows for a new sheet format.
-    body: JSON.stringify({ postRows: safePostRows, postRowsV2: safePostRows }),
+    // Fixed to write only to posts_v2 (single sheet) to avoid duplicate sheet creation.
+    body: JSON.stringify({ postRowsV2: safePostRows }),
   });
 
   if (!response.ok) {

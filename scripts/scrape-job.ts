@@ -1424,7 +1424,7 @@ async function run(jobId: string) {
     sheetPending.length = 0;
 
     try {
-      await sendRowsToGoogleSheet(rowsToSend, []);
+      await sendRowsToGoogleSheet(rowsToSend);
       sheetState.synced += rowsToSend.length;
       await prisma.scrapeJob
         .update({

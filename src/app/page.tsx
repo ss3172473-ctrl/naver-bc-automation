@@ -51,6 +51,119 @@ type JobProgress = {
   dbSynced?: number;
 };
 
+const EXCLUDE_BOARD_OPTIONS_STORAGE_KEY = "scrapeDashboardExcludeBoards:v1";
+const SESSION_PANEL_OPEN_KEY = "scrapeDashboardSessionPanelOpen:v1";
+const EXCLUDE_BOARD_OPTIONS_DEFAULT = [
+  "도치맘 핫딜공구🔛",
+  "광고",
+  "홍보",
+  "도치맘 핫딜공구",
+  "공지",
+];
+
+const STAGE_ORDER: Record<string, number> = {
+  QUEUED: 0,
+  SEARCH: 1,
+  PARSE: 2,
+  DONE: 3,
+  CANCELLED: 4,
+  FAILED: 5,
+};
+
+const PIPELINE_STEPS = ["작업 생성", "검색 실행", "본문/댓글 파싱", "저장 및 연동"];
+
+const PIPELINE_STEP_BY_STAGE: Record<string, number> = {
+  QUEUED: 0,
+  SEARCH: 1,
+  PARSE: 2,
+  DONE: 3,
+  CANCELLED: 3,
+  FAILED: 3,
+};
+
+const STAGE_LABELS: Record<string, string> = {
+  SEARCH: "검색",
+  PARSE: "본문/댓글 파싱",
+  DONE: "저장 완료",
+  CANCELLED: "중단됨",
+  FAILED: "실패",
+};
+
+const JOB_STATUS_LABELS: Record<string, string> = {
+  QUEUED: "실행 대기",
+  RUNNING: "실행 중",
+  SUCCESS: "성공",
+  FAILED: "실패",
+  CANCELLED: "중단됨",
+};
+
+function getStoredSessionPanelOpen() {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(SESSION_PANEL_OPEN_KEY);
+    if (value === "1") return true;
+    if (value === "0") return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredSessionPanelOpen(next: boolean) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SESSION_PANEL_OPEN_KEY, next ? "1" : "0");
+  } catch {
+    // localStorage 예외는 무시
+  }
+}
+
+function getStageLabel(stage?: string) {
+  const key = String(stage || "").toUpperCase();
+  return STAGE_LABELS[key] || "대기/준비";
+}
+
+function getStageIndex(stage?: string) {
+  const key = String(stage || "").toUpperCase();
+  return STAGE_ORDER[key] ?? 0;
+}
+
+function getProgressPercent(stage?: string) {
+  const key = String(stage || "").toUpperCase();
+  if (key === "DONE") return 100;
+  const idx = getStageIndex(key);
+  if (idx <= 1) return Math.min(45, idx * 18 + 2);
+  if (idx === 2) return 60;
+  if (idx >= 3) return 100;
+  return 8;
+}
+
+function getPipelineIndex(stage?: string) {
+  const key = String(stage || "").toUpperCase();
+  return PIPELINE_STEP_BY_STAGE[key] ?? 0;
+}
+
+function isFinishedStage(stage?: string) {
+  const key = String(stage || "").toUpperCase();
+  return key === "DONE" || key === "CANCELLED" || key === "FAILED";
+}
+
+function formatAgo(iso?: string) {
+  if (!iso) return "-";
+  const now = new Date();
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "-";
+  const diffMs = Math.max(0, now.getTime() - t);
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `${sec}초 전`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}분 전`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}시간 전`;
+  const day = Math.floor(hr / 24);
+  return `${day}일 전`;
+}
+
 function parseJsonList(input: string | null): string[] {
   if (!input) return [];
   try {
@@ -65,6 +178,7 @@ export default function DashboardPage() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [storageStateText, setStorageStateText] = useState("");
   const [savingSession, setSavingSession] = useState(false);
+  const [isSessionOpen, setIsSessionOpen] = useState(true);
 
   const [cafes, setCafes] = useState<JoinedCafe[]>([]);
   const [cafesLoading, setCafesLoading] = useState(false);
@@ -78,8 +192,10 @@ export default function DashboardPage() {
   const [directUrlsText, setDirectUrlsText] = useState("");
   const [includeKeywordsText, setIncludeKeywordsText] = useState("");
   const [excludeKeywordsText, setExcludeKeywordsText] = useState("");
-  const [excludeBoardsText, setExcludeBoardsText] = useState("");
   const [datePreset, setDatePreset] = useState<"1m" | "3m" | "6m" | "1y" | "2y" | "all">("3m");
+  const [excludeBoardCandidates, setExcludeBoardCandidates] = useState<string[]>(() => EXCLUDE_BOARD_OPTIONS_DEFAULT);
+  const [selectedExcludeBoards, setSelectedExcludeBoards] = useState<string[]>([]);
+  const [customExcludeBoard, setCustomExcludeBoard] = useState("");
   const [minViewCount, setMinViewCount] = useState("");
   const [minCommentCount, setMinCommentCount] = useState("");
   const [useAutoFilter, setUseAutoFilter] = useState(true);
@@ -88,6 +204,44 @@ export default function DashboardPage() {
   const [startingJobId, setStartingJobId] = useState<string | null>(null);
   const [progressByJobId, setProgressByJobId] = useState<Record<string, JobProgress | null>>({});
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+
+  const jobStatusSummary = useMemo(() => {
+    const total = jobs.length;
+    const queue = jobs.filter((job) => job.status === "QUEUED").length;
+    const running = jobs.filter((job) => job.status === "RUNNING").length;
+    const success = jobs.filter((job) => job.status === "SUCCESS").length;
+    const failed = jobs.filter((job) => job.status === "FAILED").length;
+    const cancelled = jobs.filter((job) => job.status === "CANCELLED").length;
+    return { total, queue, running, success, failed, cancelled };
+  }, [jobs]);
+
+  const activeJobs = useMemo(() => jobs.filter((job) => ["RUNNING", "QUEUED"].includes(job.status)), [jobs]);
+
+  const getJobUiState = useCallback(
+    (job: ScrapeJob) => {
+      if (job.status === "RUNNING") {
+        if (cancellingJobId === job.id) return { label: "중단 요청 중", disabled: true };
+        return { label: "중단", disabled: false };
+      }
+      if (job.status === "QUEUED") {
+        if (startingJobId === job.id) return { label: "실행 요청 중", disabled: true };
+        return { label: "시작 대기", disabled: false };
+      }
+      if (startingJobId === job.id) return { label: "재실행 요청 중", disabled: true };
+      return { label: "재실행", disabled: false };
+    },
+    [cancellingJobId, startingJobId]
+  );
+
+  const getStatusBadgeClass = useCallback((status: string) => {
+    const key = String(status || "").toUpperCase();
+    if (key === "RUNNING") return "bg-blue-100 text-blue-800";
+    if (key === "QUEUED") return "bg-amber-100 text-amber-800";
+    if (key === "SUCCESS") return "bg-emerald-100 text-emerald-800";
+    if (key === "FAILED") return "bg-red-100 text-red-700";
+    if (key === "CANCELLED") return "bg-slate-200 text-slate-700";
+    return "bg-slate-100 text-slate-700";
+  }, []);
 
   const keywordCount = useMemo(() => {
     const list = keywords
@@ -114,6 +268,54 @@ export default function DashboardPage() {
     if (keywordCount >= 30) return 60;
     return 80;
   }, [keywordCount, selectedCafeIds.length]);
+
+  const normalizeExcludeBoardValue = useCallback((value: string) => value.trim().replace(/\s+/g, " "), []);
+
+  const saveExcludeBoardsPreference = useCallback(
+    (values: string[]) => {
+      if (typeof window === "undefined") return;
+      try {
+        window.localStorage.setItem(
+          EXCLUDE_BOARD_OPTIONS_STORAGE_KEY,
+          JSON.stringify(values)
+        );
+      } catch {
+        // 브라우저 환경에서 localStorage 예외는 무시
+      }
+    },
+    []
+  );
+
+  const addExcludeBoard = useCallback(
+    (value: string) => {
+      const next = normalizeExcludeBoardValue(value);
+      if (!next) return;
+
+      const lower = next.toLowerCase();
+      const nextUnique = (prev: string[]) => {
+        if (prev.some((item) => item.toLowerCase() === lower)) return prev;
+        return [...prev, next];
+      };
+
+      setSelectedExcludeBoards((prev) => {
+        const updated = nextUnique(prev);
+        if (updated.length !== prev.length) {
+          saveExcludeBoardsPreference(updated);
+        }
+        return updated;
+      });
+
+      setExcludeBoardCandidates((prev) => nextUnique(prev));
+      setCustomExcludeBoard("");
+    },
+    [normalizeExcludeBoardValue, saveExcludeBoardsPreference]
+  );
+
+  const removeExcludeBoard = useCallback((value: string) => {
+    const next = selectedExcludeBoards.filter((item) => item !== value);
+    setSelectedExcludeBoards(next);
+    saveExcludeBoardsPreference(next);
+  }, [selectedExcludeBoards, saveExcludeBoardsPreference]);
 
   const computeDateRange = useCallback(
     (preset: "1m" | "3m" | "6m" | "1y" | "2y" | "all") => {
@@ -149,9 +351,32 @@ export default function DashboardPage() {
       setSessionLoading(true);
       const res = await fetch("/api/session");
       const data = await res.json();
-      if (data.success) setSession(data.data);
+      if (data.success) {
+        setSession(data.data);
+        const userPreference = getStoredSessionPanelOpen();
+        if (userPreference === null) {
+          setIsSessionOpen(!data.data?.hasSession);
+        }
+      } else {
+        const userPreference = getStoredSessionPanelOpen();
+        if (userPreference === null) {
+          setIsSessionOpen(true);
+        }
+      }
     } finally {
       setSessionLoading(false);
+    }
+  }, []);
+
+  const toggleSessionPanel = useCallback((next: boolean) => {
+    setIsSessionOpen(next);
+    setStoredSessionPanelOpen(next);
+  }, []);
+
+  useEffect(() => {
+    const preferred = getStoredSessionPanelOpen();
+    if (preferred !== null) {
+      setIsSessionOpen(preferred);
     }
   }, []);
 
@@ -173,6 +398,7 @@ export default function DashboardPage() {
         return;
       }
       setStorageStateText("");
+      toggleSessionPanel(false);
       await fetchSession();
       alert("세션 저장 완료");
     } finally {
@@ -188,6 +414,7 @@ export default function DashboardPage() {
       alert(data.error || "세션 삭제 실패");
       return;
     }
+    toggleSessionPanel(true);
     await fetchSession();
     alert("세션 삭제 완료");
   };
@@ -226,13 +453,22 @@ export default function DashboardPage() {
     }
   };
 
+  // Keep session status synced with short polling so session changes in another device/window appear immediately.
   useEffect(() => {
-    fetchSession();
-    fetchJobs();
-  }, [fetchSession, fetchJobs]);
+    let alive = true;
+    const tick = async () => {
+      if (!alive) return;
+      await fetchSession();
+    };
 
-  // Keep the table current: QUEUED -> RUNNING transitions are done by the Worker,
-  // so without polling users will keep seeing QUEUED until manual refresh.
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [fetchSession]);
+
   useEffect(() => {
     let alive = true;
     const tick = async () => {
@@ -246,6 +482,40 @@ export default function DashboardPage() {
       clearInterval(t);
     };
   }, [fetchJobs]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(EXCLUDE_BOARD_OPTIONS_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const normalized = parsed
+        .map((v) => {
+          if (typeof v !== "string") return "";
+          return normalizeExcludeBoardValue(v);
+        })
+        .filter(Boolean);
+      if (normalized.length === 0) return;
+
+      setSelectedExcludeBoards(normalized);
+      setExcludeBoardCandidates((prev) => {
+        const merged = [...prev];
+        const existing = new Set(merged.map((item) => item.toLowerCase()));
+        for (const value of normalized) {
+          const key = value.toLowerCase();
+          if (!existing.has(key)) {
+            merged.push(value);
+            existing.add(key);
+          }
+        }
+        return merged;
+      });
+      saveExcludeBoardsPreference(normalized);
+    } catch {
+      // ignore
+    }
+  }, [normalizeExcludeBoardValue, saveExcludeBoardsPreference]);
 
   useEffect(() => {
     const running = jobs.filter((j) => j.status === "RUNNING");
@@ -333,7 +603,7 @@ export default function DashboardPage() {
           directUrls: directUrlsText,
           includeKeywords: includeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
           excludeKeywords: excludeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
-          excludeBoards: excludeBoardsText.split(",").map((v) => v.trim()).filter(Boolean),
+          excludeBoards: selectedExcludeBoards.map((board) => normalizeExcludeBoardValue(board)).filter(Boolean),
           fromDate,
           toDate,
           minViewCount: minViewCount === "" ? null : Number(minViewCount),
@@ -375,42 +645,192 @@ export default function DashboardPage() {
           </button>
         </header>
 
+        <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
+          <h2 className="text-lg font-semibold text-black">작업 처리 파이프라인</h2>
+          <p className="text-sm text-slate-600">
+            Next.js(App Router) 웹에서 작업 등록/조회, 별도 Node Worker에서 큐 실행, Playwright로 크롤링한 뒤 Prisma + Google Sheets로 저장합니다.
+          </p>
+          <ol className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 text-sm">
+            {PIPELINE_STEPS.map((label, index) => (
+              <li key={label} className="border border-slate-200 rounded-lg p-2 text-slate-700 bg-slate-50">
+                {index + 1}. {label}
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+          <h2 className="text-lg font-semibold text-black">현재 진행 상태</h2>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+            <div className="border border-slate-200 rounded-xl p-3">
+              <p className="text-xs text-slate-600">전체</p>
+              <p className="text-xl font-bold text-black">{jobStatusSummary.total}</p>
+            </div>
+            <div className="border border-slate-200 rounded-xl p-3">
+              <p className="text-xs text-slate-600">대기</p>
+              <p className="text-xl font-bold text-black">{jobStatusSummary.queue}</p>
+            </div>
+            <div className="border border-slate-200 rounded-xl p-3">
+              <p className="text-xs text-slate-600">실행</p>
+              <p className="text-xl font-bold text-black">{jobStatusSummary.running}</p>
+            </div>
+            <div className="border border-slate-200 rounded-xl p-3">
+              <p className="text-xs text-slate-600">성공</p>
+              <p className="text-xl font-bold text-black">{jobStatusSummary.success}</p>
+            </div>
+            <div className="border border-slate-200 rounded-xl p-3">
+              <p className="text-xs text-slate-600">실패</p>
+              <p className="text-xl font-bold text-black">{jobStatusSummary.failed}</p>
+            </div>
+            <div className="border border-slate-200 rounded-xl p-3">
+              <p className="text-xs text-slate-600">중단</p>
+              <p className="text-xl font-bold text-black">{jobStatusSummary.cancelled}</p>
+            </div>
+          </div>
+
+              <div className="space-y-3">
+                <p className="text-sm font-semibold text-black">실행/대기 중 작업</p>
+                {activeJobs.length === 0 ? (
+                  <p className="text-sm text-slate-600">현재 실행/대기 중인 작업이 없습니다.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {activeJobs.map((job) => {
+                      const isRunning = job.status === "RUNNING";
+                      const p = isRunning ? (progressByJobId[job.id] || null) : null;
+                      const action = getJobUiState(job);
+                      const progressText = isRunning
+                        ? [
+                            p?.stage ? `단계: ${getStageLabel(p.stage)}` : "단계: 대기",
+                            p?.cafeName ? `카페: ${p.cafeName}` : null,
+                            p?.keyword ? `키워드: ${p.keyword}` : null,
+                            p?.candidates ? `후보: ${p.candidates}` : null,
+                            p?.collected !== undefined ? `수집: ${p.collected}` : null,
+                            p?.dbSynced !== undefined ? `DB: ${p.dbSynced}` : null,
+                            p?.sheetSynced !== undefined ? `시트: ${p.sheetSynced}` : null,
+                            p?.message ? `메시지: ${p.message}` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" / ")
+                        : "큐에서 실행 대기";
+                      const percent = isRunning ? getProgressPercent(p?.stage) : 15;
+                      const updatedAt = p?.updatedAt ? formatAgo(p.updatedAt) : "업데이트 없음";
+                      const stepIndex = isRunning ? getPipelineIndex(p?.stage) : 1;
+                      const statusKey = String(job.status || "").toUpperCase();
+
+                      return (
+                        <div key={job.id} className="border border-slate-200 rounded-lg p-3">
+                          <div className="flex flex-wrap items-center gap-2 mb-2">
+                            <p className="font-semibold text-black">{new Date(job.createdAt).toLocaleString("ko-KR")}</p>
+                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(job.status)}`}>
+                              {JOB_STATUS_LABELS[statusKey] || statusKey || "대기"}
+                            </span>
+                            <span className="text-xs text-slate-600">업데이트: {updatedAt}</span>
+                            <span className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-full">
+                              {action.label}
+                            </span>
+                            {isRunning ? (
+                              <button
+                                onClick={() => cancelJob(job.id)}
+                                disabled={action.disabled && cancellingJobId === job.id}
+                                className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
+                              >
+                                {action.label}
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => cancelJob(job.id)}
+                                disabled={action.disabled && cancellingJobId === job.id}
+                                className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
+                              >
+                                {action.label === "시작 대기" ? "대기 취소" : "중단"}
+                              </button>
+                            )}
+                          </div>
+                          <p className="text-sm text-black truncate" title={progressText}>
+                            {progressText || "-"}
+                          </p>
+                          <div className="mt-2 flex gap-2">
+                            {PIPELINE_STEPS.map((step, idx) => {
+                              const active = idx <= stepIndex;
+                              const isCurrent = isRunning ? idx === stepIndex && !isFinishedStage(p?.stage) : false;
+                              return (
+                                <span
+                                  key={step}
+                                  className={`text-xs px-2 py-1 rounded-full border ${
+                                    active
+                                      ? isCurrent
+                                        ? "bg-blue-100 border-blue-300 text-blue-800"
+                                        : "bg-emerald-100 border-emerald-300 text-emerald-800"
+                                      : "bg-slate-100 border-slate-200 text-slate-500"
+                                  }`}
+                                >
+                                  {idx + 1}. {step}
+                                </span>
+                              );
+                            })}
+                          </div>
+                          <div className="mt-2">
+                            <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                              <div
+                                className="h-2 bg-emerald-500 transition-all"
+                                style={{ width: `${Math.min(100, percent)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+        </section>
+
         <section className="bg-white border border-slate-200 rounded-2xl p-5">
           <h2 className="text-lg font-semibold text-black">1) 카페 세션 확인</h2>
-          <p className="text-sm text-black mt-1">
-            {sessionLoading
-              ? "세션 확인 중..."
-              : session?.hasSession
-                ? `세션 사용 가능 (${session.lastChecked ? new Date(session.lastChecked).toLocaleString("ko-KR") : "시간 정보 없음"})`
-                : "세션 없음 (아래에 storageState JSON 업로드 필요)"}
-          </p>
-          <div className="mt-4 space-y-2">
-            <p className="text-xs text-black">
-              Worker가 네이버에 로그인된 상태로 접속하려면 Playwright storageState(JSON)가 필요합니다.
-              1회 생성 후 아래에 붙여넣고 저장하세요.
+          <div className="flex items-center justify-between mt-1">
+            <p className="text-sm text-black">
+              {sessionLoading
+                ? "세션 확인 중..."
+                : session?.hasSession
+                  ? `세션 사용 가능 (${session.lastChecked ? new Date(session.lastChecked).toLocaleString("ko-KR") : "시간 정보 없음"})`
+                  : "세션 없음 (아래에 storageState JSON 업로드 필요)"}
             </p>
+            <button
+              onClick={() => toggleSessionPanel(!isSessionOpen)}
+              className="text-sm px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700"
+            >
+              {isSessionOpen ? "접기" : "재입력/수정"}
+            </button>
+          </div>
+          {isSessionOpen && (
+            <div className="mt-4 space-y-2">
+              <p className="text-xs text-black">
+                Worker가 네이버에 로그인된 상태로 접속하려면 Playwright storageState(JSON)가 필요합니다.
+                1회 생성 후 아래에 붙여넣고 저장하세요.
+              </p>
               <textarea
                 value={storageStateText}
                 onChange={(e) => setStorageStateText(e.target.value)}
                 placeholder='여기에 storageState JSON 전체를 붙여넣기 (예: {"cookies":[...],"origins":[...]})'
                 className="w-full h-40 p-3 border border-slate-200 rounded-lg text-xs font-mono text-black"
               />
-            <div className="flex items-center gap-2">
-              <button
-                onClick={saveSession}
-                disabled={savingSession}
-                className="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm disabled:opacity-50"
-              >
-                {savingSession ? "저장 중..." : "세션 저장"}
-              </button>
-              <button
-                onClick={deleteSession}
-                className="px-3 py-2 bg-slate-200 text-slate-900 rounded-lg text-sm"
-              >
-                세션 삭제
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={saveSession}
+                  disabled={savingSession}
+                  className="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm disabled:opacity-50"
+                >
+                  {savingSession ? "저장 중..." : "세션 저장"}
+                </button>
+                <button
+                  onClick={deleteSession}
+                  className="px-3 py-2 bg-slate-200 text-slate-900 rounded-lg text-sm"
+                >
+                  세션 삭제
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </section>
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5">
@@ -477,13 +897,71 @@ export default function DashboardPage() {
             </div>
 
             <div>
-              <label className="text-sm text-slate-700">제외 게시판 (쉼표 구분, 공백 자동 제거)</label>
-              <input
-                value={excludeBoardsText}
-                onChange={(e) => setExcludeBoardsText(e.target.value)}
-                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black"
-                placeholder="도치맘 핫딜공구🔛, 광고게시판"
-              />
+              <label className="text-sm text-slate-700">제외 게시판 (드롭다운에서 선택, 수동 입력 가능)</label>
+              <div className="mt-1 grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-2">
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (!value) return;
+                    addExcludeBoard(value);
+                    (e.target as HTMLSelectElement).value = "";
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-black bg-white"
+                >
+                  <option value="">게시판 선택</option>
+                  {excludeBoardCandidates
+                    .filter((candidate) => !selectedExcludeBoards.includes(candidate))
+                    .map((candidate) => (
+                      <option key={candidate} value={candidate}>
+                        {candidate}
+                      </option>
+                    ))}
+                </select>
+
+                <div className="flex gap-2">
+                  <input
+                    value={customExcludeBoard}
+                    onChange={(e) => setCustomExcludeBoard(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      addExcludeBoard(customExcludeBoard);
+                    }}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg text-black"
+                    placeholder="예) 광고게시판, 핫딜공구"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => addExcludeBoard(customExcludeBoard)}
+                    className="px-3 py-2 text-sm bg-slate-900 text-white rounded-lg"
+                  >
+                    추가
+                  </button>
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {selectedExcludeBoards.length === 0 ? (
+                  <span className="text-xs text-slate-600">선택된 제외 게시판이 없습니다.</span>
+                ) : (
+                  selectedExcludeBoards.map((board) => (
+                    <span
+                      key={board}
+                      className="inline-flex items-center gap-2 px-2 py-1 text-xs bg-slate-100 text-slate-700 rounded-full"
+                    >
+                      {board}
+                      <button
+                        type="button"
+                        onClick={() => removeExcludeBoard(board)}
+                        className="text-slate-500 hover:text-red-600"
+                        aria-label={`${board} 제거`}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))
+                )}
+              </div>
               <div className="mt-1 text-xs text-slate-600">
                 입력 시 해당 게시판 글을 검색 후보에서 미리 제외합니다.
               </div>
@@ -501,11 +979,15 @@ export default function DashboardPage() {
 
             <div>
               <label className="text-sm text-slate-700">기간</label>
-              <select
-                value={datePreset}
-                onChange={(e) => setDatePreset(e.target.value as any)}
-                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg bg-white text-black"
-              >
+                <select
+                  value={datePreset}
+                  onChange={(e) =>
+                    setDatePreset(
+                      e.target.value as "1m" | "3m" | "6m" | "1y" | "2y" | "all"
+                    )
+                  }
+                  className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg bg-white text-black"
+                >
                 <option value="1m">최근 1개월</option>
                 <option value="3m">최근 3개월</option>
                 <option value="6m">최근 6개월</option>
@@ -593,8 +1075,8 @@ export default function DashboardPage() {
                       return idx === 0 ? "대기중 (다음 순서)" : `대기중 (앞에 ${idx}개)`;
                     })();
 
-                    const progressText = (() => {
-                      if (job.status === "RUNNING") {
+                      const progressText = (() => {
+                        if (job.status === "RUNNING") {
                         return [
                           p?.stage ? `단계:${p.stage}` : null,
                           p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
@@ -608,45 +1090,51 @@ export default function DashboardPage() {
                             .filter(Boolean)
                             .join(" ");
                       }
-                      if (job.status === "QUEUED") return queuedPositionText || "-";
-                      return "-";
-                    })();
+                        if (job.status === "QUEUED") return queuedPositionText || "-";
+                        return "-";
+                      })();
+                      const action = getJobUiState(job);
+                      const jobStatusText = JOB_STATUS_LABELS[String(job.status || "").toUpperCase()] || job.status;
 
-                    return (
-                      <tr key={job.id} className="border-b border-slate-100">
-                        <td className="py-2">{new Date(job.createdAt).toLocaleString("ko-KR")}</td>
+                      return (
+                        <tr key={job.id} className="border-b border-slate-100">
+                          <td className="py-2">{new Date(job.createdAt).toLocaleString("ko-KR")}</td>
                         <td className="py-2 max-w-[180px] truncate" title={keywordText}>{keywordText}</td>
                         <td className="py-2 max-w-[180px] truncate" title={cafeText}>{cafeText}</td>
                         <td className="py-2">{filterText}{boardFilterText}</td>
                         <td className="py-2 max-w-[260px] truncate" title={progressText}>{progressText}</td>
                         <td className="py-2">{runningResult}</td>
-                        <td className="py-2">{job.status}</td>
-                        <td className="py-2">
-                          {job.status === "RUNNING" ? (
-                            <button
-                              onClick={() => cancelJob(job.id)}
-                              disabled={cancellingJobId === job.id}
-                              className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
-                            >
-                              {cancellingJobId === job.id ? "중단 요청 중" : "중단"}
-                            </button>
-                          ) : job.status === "QUEUED" ? (
-                            <button
-                              onClick={() => cancelJob(job.id)}
-                              disabled={cancellingJobId === job.id}
-                              className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
-                            >
-                              {cancellingJobId === job.id ? "취소 중" : "대기 취소"}
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => startJob(job.id)}
-                              disabled={startingJobId === job.id}
-                              className="px-2 py-1 text-xs bg-slate-800 text-white rounded"
-                            >
-                              {startingJobId === job.id ? "시작 중" : "재실행"}
-                            </button>
-                          )}
+                          <td className="py-2">
+                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(job.status)}`}>
+                              {jobStatusText}
+                            </span>
+                          </td>
+                          <td className="py-2">
+                            {job.status === "RUNNING" ? (
+                              <button
+                                onClick={() => cancelJob(job.id)}
+                                disabled={action.disabled && cancellingJobId === job.id}
+                                className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
+                              >
+                                {action.label}
+                              </button>
+                            ) : job.status === "QUEUED" ? (
+                              <button
+                                onClick={() => cancelJob(job.id)}
+                                disabled={action.disabled && cancellingJobId === job.id}
+                                className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
+                              >
+                                {action.label === "시작 대기" ? "대기 취소" : action.label}
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => startJob(job.id)}
+                                disabled={action.disabled}
+                                className="px-2 py-1 text-xs bg-slate-800 text-white rounded disabled:opacity-50"
+                              >
+                                {action.label}
+                              </button>
+                            )}
                           {job.errorMessage && <p className="text-xs text-red-600 mt-1">{job.errorMessage}</p>}
                         </td>
                       </tr>

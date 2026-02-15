@@ -17,6 +17,9 @@ Required on Web + Worker:
 
 Required on Worker:
 - `GSHEET_WEBHOOK_URL` (optional but recommended)
+
+예시:
+`GSHEET_WEBHOOK_URL=https://script.google.com/macros/s/AKfycbzIFtOr6yGpeh2ZVqdsP2Bt4Ekt7Q7GfV6LGTo5pLR2AE-HqYQGFkP-7EX6fCTd5HLQcA/exec`
 - `TELEGRAM_BOT_TOKEN` (optional, for completion/failure notifications)
 
 Required on Web (if using Telegram webhook):
@@ -40,8 +43,7 @@ Worker는 DB에 저장된 Playwright `storageState`를 사용합니다.
 ## Google Sheets integration
 Use Apps Script Web App endpoint as `GSHEET_WEBHOOK_URL`.
 Payload sent by worker:
-- `postRows`: post-level rows
-- `commentRows`: comment-level rows
+- `postRowsV2`: post-level rows (single-sheet format)
 
 ## Telegram (optional)
 - Webhook endpoint: `/api/telegram/webhook`
