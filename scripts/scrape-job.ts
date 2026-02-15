@@ -180,6 +180,13 @@ function includesKeyword(text: string, keyword: string): boolean {
   return compact.includes(kw);
 }
 
+function makeSearchQueryFromTitle(title: string): string {
+  const compact = String(title || "").replace(/\s+/g, "");
+  if (!compact) return "";
+  // Keep it short to reduce search noise, but long enough to be unique.
+  return compact.slice(0, 12);
+}
+
 function looksLikeJoinWall(text: string): boolean {
   const t = text.replace(/\s+/g, " ");
   const flags = [
@@ -1052,6 +1059,34 @@ async function parsePost(
     const likeCount = countsBody.likeCount || countsTop.likeCount || 0;
     const commentCount = countsBody.commentCount || countsTop.commentCount || 0;
 
+    // If counts (especially like/comment) are missing/unstable in DOM text,
+    // re-fetch via the Cafe search API using a short title query and match by articleId.
+    let finalViewCount = viewCount;
+    let finalLikeCount = likeCount;
+    let finalCommentCount = commentCount;
+    let finalPublishedAt = publishedAt;
+
+    if (
+      expectedArticleId &&
+      /^\d+$/.test(String(cafeNumericId || "")) &&
+      (finalLikeCount === 0 || finalCommentCount === 0 || finalViewCount === 0 || !finalPublishedAt)
+    ) {
+      const q = makeSearchQueryFromTitle(title);
+      if (q) {
+        const rows = await fetchCandidatesFromSearchApi(page, String(cafeNumericId), q, 1).catch(() => []);
+        const match = rows.find((r) => String(r.articleId) === String(expectedArticleId));
+        if (match) {
+          if (!finalViewCount) finalViewCount = match.readCount;
+          if (!finalLikeCount) finalLikeCount = match.likeCount;
+          if (!finalCommentCount) finalCommentCount = match.commentCount;
+          if (!finalPublishedAt && match.addedAt) finalPublishedAt = match.addedAt;
+          console.log(
+            `[parse] counts via searchApi view=${finalViewCount} like=${finalLikeCount} comments=${finalCommentCount}`
+          );
+        }
+      }
+    }
+
     // Skip author parsing (unstable selectors; not needed for the user's sheet workflow).
     const authorName = "";
 
@@ -1066,10 +1101,10 @@ async function parsePost(
       cafeUrl: getCafeUrl(cafeId),
       title: title || "",
       authorName,
-      publishedAt,
-      viewCount,
-      likeCount,
-      commentCount,
+      publishedAt: finalPublishedAt,
+      viewCount: finalViewCount,
+      likeCount: finalLikeCount,
+      commentCount: finalCommentCount,
       bodyText: bodyPlusSource,
       commentsText,
       contentText,
