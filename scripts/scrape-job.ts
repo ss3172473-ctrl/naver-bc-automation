@@ -503,7 +503,7 @@ async function extractBestText(target: Frame | Page): Promise<string> {
       const loc = (target as any).locator(sel).first();
       const count = await loc.count().catch(() => 0);
       if (count === 0) continue;
-      const txt = String(await withTimeout(loc.innerText(), 15000, `innerText ${sel}`)).trim();
+      const txt = String(await withTimeout(loc.innerText(), 6000, `innerText ${sel}`)).trim();
       if (txt.length > best.length) best = txt;
     } catch {
       // ignore
@@ -580,7 +580,7 @@ async function extractPostBodyText(target: Frame | Page): Promise<string> {
       const take = Math.min(count, 6);
       for (let i = 0; i < take; i += 1) {
         const txt = String(
-          await withTimeout(loc.nth(i).innerText(), 20000, `body innerText ${sel}#${i}`)
+          await withTimeout(loc.nth(i).innerText(), 6000, `body innerText ${sel}#${i}`)
         ).trim();
         if (!txt) continue;
         if (bad(txt)) continue;
