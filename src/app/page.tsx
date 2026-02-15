@@ -18,6 +18,10 @@ type ScrapeJob = {
   id: string;
   status: string;
   keywords: string;
+  directUrls?: string | null;
+  excludeWords?: string | null;
+  fromDate?: string | null;
+  toDate?: string | null;
   cafeNames: string | null;
   cafeIds: string | null;
   minViewCount: number | null;
@@ -486,6 +490,7 @@ export default function DashboardPage() {
   const [savingSession, setSavingSession] = useState(false);
   const [isSessionOpen, setIsSessionOpen] = useState(true);
   const [matrixOrientation, setMatrixOrientation] = useState<MatrixOrientation>("keyword_rows");
+  const [hideActiveJobCards, setHideActiveJobCards] = useState(true);
 
   const [cafes, setCafes] = useState<JoinedCafe[]>([]);
   const [cafesLoading, setCafesLoading] = useState(false);
@@ -520,6 +525,37 @@ export default function DashboardPage() {
       return display === "RUNNING" || display === "QUEUED";
     });
   }, [jobs, progressByJobId]);
+
+  const buildJobSignature = useCallback((job: ScrapeJob) => {
+    // Used to group split jobs into one "batch" view (same conditions, created around the same time).
+    return [
+      job.keywords || "",
+      job.directUrls || "",
+      job.excludeWords || "",
+      job.fromDate || "",
+      job.toDate || "",
+      String(job.minViewCount ?? ""),
+      String(job.minCommentCount ?? ""),
+      job.useAutoFilter ? "1" : "0",
+      job.excludeBoards || "",
+    ].join("|");
+  }, []);
+
+  const latestBatchJobs = useMemo(() => {
+    if (jobs.length <= 1) return [];
+    const sorted = jobs
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const ref = sorted[0];
+    if (!ref) return [];
+    const refSig = buildJobSignature(ref);
+    const refTime = new Date(ref.createdAt).getTime();
+    const windowMs = 1000 * 60 * 10; // 10 minutes
+    return sorted.filter((j) => {
+      const t = new Date(j.createdAt).getTime();
+      return Math.abs(t - refTime) <= windowMs && buildJobSignature(j) === refSig;
+    });
+  }, [jobs, buildJobSignature]);
 
   const getJobUiState = useCallback(
     (statusKey: string, jobId: string) => {
@@ -747,6 +783,26 @@ export default function DashboardPage() {
     const progress = data?.data?.progress || null;
     setProgressByJobId((prev) => ({ ...prev, [jobId]: progress }));
   }, []);
+
+  // Prefetch progress for recent jobs so "최근 작업"에서도 마지막 메시지(예: searched pages=.../4)가 보이도록 함.
+  // 이미 progress가 로드된 jobId는 다시 요청하지 않습니다.
+  useEffect(() => {
+    const ids = jobs.slice(0, 10).map((j) => j.id).filter(Boolean);
+    for (const id of ids) {
+      if (progressByJobId[id] === undefined) {
+        fetchProgress(id);
+      }
+    }
+  }, [jobs, progressByJobId, fetchProgress]);
+
+  // Ensure active/queued jobs always have a progress snapshot so the UI doesn't look blank.
+  useEffect(() => {
+    for (const job of activeJobs) {
+      if (progressByJobId[job.id] === undefined) {
+        fetchProgress(job.id);
+      }
+    }
+  }, [activeJobs, progressByJobId, fetchProgress]);
 
   const cancelJob = async (jobId: string) => {
     try {
@@ -1062,21 +1118,46 @@ export default function DashboardPage() {
                 selectedCafes.length
               );
 
+        const failures: Array<{ cafeName: string; cafeId: string; error: string }> = [];
         for (let i = 0; i < selectedCafes.length; i += 1) {
           const cafe = selectedCafes[i];
-          const jobId = await postCreate({
-            ...basePayload,
-            maxPosts: perCafeMaxPosts[i],
-            selectedCafes: [cafe],
-          });
-          createdJobIds.push(jobId);
+          try {
+            const jobId = await postCreate({
+              ...basePayload,
+              maxPosts: perCafeMaxPosts[i],
+              selectedCafes: [cafe],
+            });
+            createdJobIds.push(jobId);
+          } catch (error) {
+            failures.push({
+              cafeName: String((cafe as { name?: unknown } | undefined)?.name || cafe.cafeId),
+              cafeId: cafe.cafeId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           // A tiny delay to avoid bursting requests (helps stability).
           await sleep(150);
+        }
+
+        if (failures.length > 0) {
+          // Let the user know which cafes failed to create jobs.
+          const lines = failures
+            .slice(0, 8)
+            .map((f) => `- ${f.cafeName} (${f.cafeId}): ${String(f.error).slice(0, 120)}`);
+          const more = failures.length > 8 ? `\n... 외 ${failures.length - 8}개` : "";
+          alert(
+            `일부 카페 작업 생성에 실패했습니다. (성공 ${createdJobIds.length} / 실패 ${failures.length})\n\n실패 목록:\n${lines.join("\n")}${more}\n\n실패한 카페만 다시 선택해서 재시도해 주세요.`
+          );
         }
       }
 
       await fetchJobs();
       createdJobIds.forEach((id) => fetchProgress(id));
+
+      if (createdJobIds.length === 0) {
+        alert("작업 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+        return;
+      }
 
       if (createdJobIds.length === 1) {
         alert("작업을 큐에 등록했습니다. Worker가 순서대로 실행합니다.");
@@ -1115,7 +1196,154 @@ export default function DashboardPage() {
               <p className="text-sm text-slate-600">현재 실행/대기 중인 작업이 없습니다.</p>
             ) : (
               <div className="space-y-3">
-                {activeJobs.map((job) => {
+                {latestBatchJobs.length > 1 ? (
+                  <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-black">통합 진행표 (카페별 분할 작업)</p>
+                        <p className="text-xs text-slate-600">
+                          카페 {latestBatchJobs.length}개 작업을 하나의 표로 합쳐서 보여줍니다. (완료/실행/대기 포함)
+                        </p>
+                      </div>
+                      <button
+                        className="px-2 py-1 text-xs rounded bg-white border border-slate-200 text-slate-700"
+                        onClick={() => setHideActiveJobCards((v) => !v)}
+                      >
+                        {hideActiveJobCards ? "작업 카드 보기" : "작업 카드 숨기기"}
+                      </button>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {latestBatchJobs.map((job) => {
+                        const cafeId = parseJsonList(job.cafeIds)?.[0] || job.id;
+                        const cafeName = parseJsonList(job.cafeNames)?.[0] || cafeId;
+                        const p = progressByJobId[job.id] || null;
+                        const display = resolveDisplayStatus(job.status, p);
+                        const msg = p?.message ? String(p.message) : "-";
+                        const when = p?.updatedAt ? formatAgo(p.updatedAt) : "-";
+                        const collected = typeof p?.collected === "number" ? p.collected : (job.resultCount ?? 0);
+                        return (
+                          <div key={`batch-msg-${job.id}`} className="text-xs border border-slate-200 rounded-md p-2 bg-white">
+                            <div className="font-semibold text-slate-800 truncate" title={cafeName}>
+                              {shortenCafeName(cafeName)}
+                            </div>
+                            <div className="text-slate-600">
+                              상태: {display} / 수집: {collected}
+                            </div>
+                            <div className="text-slate-600 truncate" title={msg}>
+                              메시지: {msg}
+                            </div>
+                            <div className="text-slate-500">업데이트: {when}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {(() => {
+                      const batchKeywords = (() => {
+                        const first = latestBatchJobs[0];
+                        const list = first ? parseJsonList(first.keywords) : [];
+                        return Array.isArray(list) ? list : [];
+                      })();
+                      const cafes = latestBatchJobs
+                        .map((job) => {
+                          const ids = parseJsonList(job.cafeIds);
+                          const names = parseJsonList(job.cafeNames);
+                          const p = progressByJobId[job.id] || null;
+                          const display = resolveDisplayStatus(job.status, p);
+                          const collected = typeof p?.collected === "number" ? p.collected : (job.resultCount ?? 0);
+                          return {
+                            jobId: job.id,
+                            cafeId: ids?.[0] || "",
+                            cafeName: names?.[0] || ids?.[0] || "",
+                            status: display,
+                            collected,
+                          };
+                        })
+                        .filter((c) => c.cafeId);
+
+                      const lookupCell = (jobId: string, cafeId: string, keyword: string) => {
+                        const p = progressByJobId[jobId] || null;
+                        const matrix = p?.keywordMatrix as Record<string, JobProgressCell> | undefined;
+                        if (!matrix) return null;
+                        return matrix[makePairKey(cafeId, keyword)] || null;
+                      };
+
+                      return (
+                        <div className="mt-3 overflow-x-auto">
+                          <table className="w-full text-xs bg-white border border-slate-200 rounded-md">
+                            <thead>
+                              <tr className="text-left border-b border-slate-200">
+                                <th className="px-2 py-2">키워드 / 카페</th>
+                                {cafes.map((c) => (
+                                  <th
+                                    key={`batch-cafe-${c.cafeId}`}
+                                    className="px-2 py-2 whitespace-nowrap"
+                                    title={c.cafeName}
+                                  >
+                                    {shortenCafeName(c.cafeName)}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {batchKeywords.map((kw) => (
+                                <tr key={`batch-row-${kw}`} className="border-b border-slate-100">
+                                  <td className="px-2 py-2 font-semibold">{kw}</td>
+                                  {cafes.map((c) => {
+                                    const cell = lookupCell(c.jobId, c.cafeId, kw);
+                                    const p = progressByJobId[c.jobId] || null;
+                                    const isCurrent = p?.cafeId === c.cafeId && p?.keyword === kw && !isFinishedStage(p?.stage);
+                                    const status = cell
+                                      ? formatCellStatus(cell, {
+                                          isRunning: c.status === "RUNNING",
+                                          isCurrent,
+                                          cafeIndex: 0,
+                                          keywordIndex: 0,
+                                        })
+                                      : c.status === "SUCCESS"
+                                        ? "완료"
+                                        : c.status === "FAILED"
+                                          ? "실패"
+                                          : c.status === "CANCELLED"
+                                            ? "중단"
+                                            : c.status === "RUNNING"
+                                              ? (isCurrent ? "실행" : "대기")
+                                              : "대기";
+                                    const cNum = cell ? Number(cell.collected ?? 0) : null;
+                                    const sNum = cell ? Number(cell.skipped ?? 0) : null;
+                                    const fNum = cell ? Number(cell.filteredOut ?? 0) : null;
+                                    const tooltip = cell
+                                      ? `수집 ${cNum} / 스킵 ${sNum} / 필터 ${fNum}`
+                                      : `${status} (작업 상태: ${c.status}, 총수집: ${c.collected})`;
+                                    return (
+                                      <td
+                                        key={`batch-cell-${c.cafeId}-${kw}`}
+                                        className={`px-2 py-2 whitespace-nowrap ${isCurrent ? "bg-blue-50" : ""}`}
+                                        title={tooltip}
+                                      >
+                                        <div className="space-y-0.5">
+                                          <div>{status}</div>
+                                          <div className="text-[11px] text-slate-500">
+                                            {cell ? `수집 ${cNum} / 스킵 ${sNum} / 필터 ${fNum}` : `총수집 ${c.collected}`}
+                                          </div>
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                ) : null}
+
+                {hideActiveJobCards && latestBatchJobs.length > 1 ? null : (
+                  <>
+                    {activeJobs.map((job) => {
                       const p = progressByJobId[job.id] || null;
                       const effectiveStatus = resolveDisplayStatus(job.status, p);
                       const isRunning = effectiveStatus === "RUNNING";
@@ -1348,7 +1576,9 @@ export default function DashboardPage() {
                           </div>
                         </div>
                       );
-                })}
+                    })}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -1667,25 +1897,34 @@ export default function DashboardPage() {
                     })();
 
                       const progressText = (() => {
+                        const base = [
+                          p?.stage ? `단계:${getStageLabel(p.stage)}` : null,
+                          p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
+                          p?.cafeIndex && p?.cafeTotal ? `(${p.cafeIndex}/${p.cafeTotal})` : null,
+                          p?.keyword ? `키워드:${p.keyword}` : null,
+                          p?.keywordIndex && p?.keywordTotal ? `(${p.keywordIndex}/${p.keywordTotal})` : null,
+                          p?.url ? `URL:${String(p.url).slice(0, 30)}…` : null,
+                          typeof p?.parseAttempts === "number" ? `파싱:${p.parseAttempts}` : null,
+                          typeof p?.collected === "number" ? `수집:${p.collected}` : null,
+                          p?.message ? `메시지:${p.message}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" / ");
+
                         if (displayStatus === "RUNNING") {
-                          return [
-                            p?.stage ? `단계:${p.stage}` : null,
-                            p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
-                            p?.cafeIndex && p?.cafeTotal ? `(${p.cafeIndex}/${p.cafeTotal})` : null,
-                            p?.keyword ? `키워드:${p.keyword}` : null,
-                            p?.keywordIndex && p?.keywordTotal ? `(${p.keywordIndex}/${p.keywordTotal})` : null,
-                            p?.url ? `URL:${String(p.url).slice(0, 30)}…` : null,
-                            typeof p?.parseAttempts === "number" ? `파싱:${p.parseAttempts}` : null,
-                            typeof p?.collected === "number" ? `수집:${p.collected}` : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" ");
+                          return base || "실행 중";
                         }
-                        if (displayStatus === "SUCCESS") return `완료: ${runningResultDetail || "처리 완료"}`;
-                        if (displayStatus === "FAILED") return `실패: ${runningResultDetail || "처리 실패"}`;
-                        if (displayStatus === "CANCELLED") return `중단: ${runningResultDetail || "사용자 중단"}`;
-                        if (displayStatus === "QUEUED") return queuedPositionText || "-";
-                        return "-";
+                        if (displayStatus === "SUCCESS") {
+                          return base || `완료: ${runningResultDetail || "처리 완료"}`;
+                        }
+                        if (displayStatus === "FAILED") {
+                          return base || `실패: ${runningResultDetail || "처리 실패"}`;
+                        }
+                        if (displayStatus === "CANCELLED") {
+                          return base || `중단: ${runningResultDetail || "사용자 중단"}`;
+                        }
+                        if (displayStatus === "QUEUED") return queuedPositionText || base || "-";
+                        return base || "-";
                       })();
                       const action = getJobUiState(displayStatus, job.id);
                       const listBadge = buildDisplayBadge(displayStatus, job, p);
@@ -1696,7 +1935,12 @@ export default function DashboardPage() {
                         <td className="py-2 max-w-[180px] truncate" title={keywordText}>{keywordText}</td>
                         <td className="py-2 max-w-[180px] truncate" title={cafeText}>{cafeText}</td>
                         <td className="py-2">{filterText}{boardFilterText}</td>
-                        <td className="py-2 max-w-[260px] truncate" title={progressText}>{progressText}</td>
+                        <td className="py-2 max-w-[260px] truncate" title={progressText}>
+                          <div className="truncate">{progressText}</div>
+                          {p?.updatedAt ? (
+                            <div className="text-xs text-slate-500">업데이트: {formatAgo(p.updatedAt)}</div>
+                          ) : null}
+                        </td>
                         <td className="py-2">
                           <div>{runningResult}</div>
                           {runningResultDetail ? (
