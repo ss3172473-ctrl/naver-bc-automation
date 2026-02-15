@@ -196,6 +196,8 @@ export default function DashboardPage() {
   const [excludeBoardCandidates, setExcludeBoardCandidates] = useState<string[]>(() => EXCLUDE_BOARD_OPTIONS_DEFAULT);
   const [selectedExcludeBoards, setSelectedExcludeBoards] = useState<string[]>([]);
   const [customExcludeBoard, setCustomExcludeBoard] = useState("");
+  const [excludeBoardLoading, setExcludeBoardLoading] = useState(false);
+  const [excludeBoardError, setExcludeBoardError] = useState<string | null>(null);
   const [minViewCount, setMinViewCount] = useState("");
   const [minCommentCount, setMinCommentCount] = useState("");
   const [useAutoFilter, setUseAutoFilter] = useState(true);
@@ -250,6 +252,11 @@ export default function DashboardPage() {
       .filter(Boolean);
     return list.length;
   }, [keywords]);
+
+  const keywordList = useMemo(
+    () => keywords.split(",").map((value) => value.trim()).filter(Boolean),
+    [keywords]
+  );
 
   const directUrlCount = useMemo(() => {
     const list = directUrlsText
@@ -537,6 +544,13 @@ export default function DashboardPage() {
     };
   }, [jobs, fetchProgress]);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchBoardCandidates();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [selectedCafeIds, keywordList, fetchBoardCandidates]);
+
   const fetchCafes = async () => {
     try {
       setCafesLoading(true);
@@ -559,6 +573,65 @@ export default function DashboardPage() {
       setCafesLoading(false);
     }
   };
+
+  const fetchBoardCandidates = useCallback(async () => {
+    if (selectedCafeIds.length === 0) {
+      setExcludeBoardCandidates((prev) =>
+        Array.from(new Set([...prev, ...selectedExcludeBoards]))
+      );
+      setExcludeBoardError(null);
+      setExcludeBoardLoading(false);
+      return;
+    }
+
+    try {
+      setExcludeBoardLoading(true);
+      setExcludeBoardError(null);
+      const res = await fetch("/api/cafe-boards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cafeIds: selectedCafeIds,
+          keywords: keywordList,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setExcludeBoardCandidates((prev) =>
+          Array.from(new Set([...prev, ...selectedExcludeBoards]))
+        );
+        setExcludeBoardError(data.error || "게시판 목록 조회 실패");
+        return;
+      }
+
+      const list = Array.isArray(data.data) ? data.data : [];
+      const normalized = list
+        .map((value: unknown) => String(value || "").trim())
+        .filter((value: string) => value.length > 0);
+
+      setExcludeBoardCandidates((prev) => {
+        const base = new Set(prev.map((value) => value.toLowerCase()));
+        const merged = [...normalized];
+        for (const board of selectedExcludeBoards) {
+          const normalizedBoard = board.toLowerCase();
+          if (!base.has(normalizedBoard)) {
+            merged.push(board);
+            base.add(normalizedBoard);
+          }
+        }
+        merged.sort((a, b) => a.localeCompare(b, "ko"));
+        return merged;
+      });
+    } catch (error) {
+      console.error("게시판 목록 조회 실패:", error);
+      setExcludeBoardCandidates((prev) =>
+        Array.from(new Set([...prev, ...selectedExcludeBoards]))
+      );
+      setExcludeBoardError("게시판 목록 조회 중 오류가 발생했습니다.");
+    } finally {
+      setExcludeBoardLoading(false);
+    }
+  }, [keywordList, selectedCafeIds, selectedExcludeBoards]);
 
   const toggleCafe = (cafeId: string) => {
     setSelectedCafeIds((prev) =>
@@ -901,7 +974,25 @@ export default function DashboardPage() {
             </div>
 
             <div>
-              <label className="text-sm text-slate-700">제외 게시판 (드롭다운에서 선택, 수동 입력 가능)</label>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-sm text-slate-700">제외 게시판 (드롭다운에서 선택, 수동 입력 가능)</label>
+                <button
+                  type="button"
+                  onClick={() => fetchBoardCandidates()}
+                  disabled={excludeBoardLoading || selectedCafeIds.length === 0}
+                  className="px-2 py-1 text-xs bg-slate-900 text-white rounded-md disabled:opacity-50"
+                >
+                  {excludeBoardLoading ? "불러오는 중..." : "게시판 갱신"}
+                </button>
+              </div>
+              {selectedCafeIds.length === 0 ? (
+                <p className="mt-1 text-xs text-slate-600">
+                  먼저 카페를 선택하면 해당 카페 실제 게시판 목록을 자동으로 불러옵니다.
+                </p>
+              ) : excludeBoardLoading ? (
+                <p className="mt-1 text-xs text-slate-600">실제 게시판 목록을 조회하는 중입니다...</p>
+              ) : null}
+              {excludeBoardError ? <p className="mt-1 text-xs text-red-600">오류: {excludeBoardError}</p> : null}
               <div className="mt-1 grid grid-cols-1 md:grid-cols-[2fr_1fr] gap-2">
                 <select
                   value=""
