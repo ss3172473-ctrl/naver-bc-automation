@@ -10,6 +10,8 @@ export interface SheetPostPayload {
   viewCount: number;
   likeCount: number;
   commentCount: number;
+  bodyText: string;
+  commentsText: string;
   contentText: string;
 }
 
@@ -45,14 +47,17 @@ export async function sendRowsToGoogleSheet(
 
   const safePostRows = postRows.map((r) => ({
     ...r,
+    bodyText: clampForSheetCell((r as any).bodyText || ""),
+    commentsText: clampForSheetCell((r as any).commentsText || ""),
     contentText: clampForSheetCell(r.contentText),
   }));
 
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // User request: write only to "posts" sheet. Do not send commentRows.
-    body: JSON.stringify({ postRows: safePostRows }),
+    // User request: write only to posts sheet(s). Do not send commentRows.
+    // We keep backward compat ("postRows") but also send v2 rows for a new sheet format.
+    body: JSON.stringify({ postRows: safePostRows, postRowsV2: safePostRows }),
   });
 
   if (!response.ok) {

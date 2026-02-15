@@ -30,6 +30,8 @@ type ParsedPost = {
   viewCount: number;
   likeCount: number;
   commentCount: number;
+  bodyText: string;
+  commentsText: string;
   contentText: string;
   rawHtml: string | null;
   comments: ParsedComment[];
@@ -123,6 +125,24 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 function asInt(input: string): number {
   const value = Number((input || "").replace(/[^\d]/g, ""));
   return Number.isFinite(value) ? value : 0;
+}
+
+function extractCountsFromText(text: string): { viewCount: number; likeCount: number; commentCount: number } {
+  const t = String(text || "");
+
+  // Examples seen in Cafe FE:
+  // "... 2026.01.27. 13:48조회 356"
+  // "좋아요0" / "좋아요 1"
+  // "댓글 7URL 복사" / " 댓글 7"
+  const viewMatch = t.match(/조회\s*([0-9][0-9,]*)/);
+  const likeMatch = t.match(/좋아요\s*([0-9][0-9,]*)/);
+  const commentMatch = t.match(/댓글\s*([0-9][0-9,]*)/);
+
+  const viewCount = viewMatch ? asInt(viewMatch[1]) : 0;
+  const likeCount = likeMatch ? asInt(likeMatch[1]) : 0;
+  const commentCount = commentMatch ? asInt(commentMatch[1]) : 0;
+
+  return { viewCount, likeCount, commentCount };
 }
 
 function isAllowedByWords(text: string, includeWords: string[], excludeWords: string[]): boolean {
@@ -352,6 +372,21 @@ async function extractPublishedAtFromPageTop(target: Frame | Page): Promise<Date
     return extractPublishedAtFromText(head);
   } catch {
     return null;
+  }
+}
+
+async function extractCountsFromPageTop(
+  target: Frame | Page
+): Promise<{ viewCount: number; likeCount: number; commentCount: number }> {
+  try {
+    const all = String(
+      await withTimeout((target as any).locator("body").innerText(), 20000, "body innerText")
+    ).trim();
+    if (!all) return { viewCount: 0, likeCount: 0, commentCount: 0 };
+    const head = all.slice(0, 5000);
+    return extractCountsFromText(head);
+  } catch {
+    return { viewCount: 0, likeCount: 0, commentCount: 0 };
   }
 }
 
@@ -980,6 +1015,13 @@ async function parsePost(
       (await extractPublishedAtFromPageTop(frame)) ||
       null;
 
+    // Derive counts from visible text (directUrls needs this; keyword mode may override later if missing).
+    const countsBody = extractCountsFromText(bodyText);
+    const countsTop = await extractCountsFromPageTop(frame);
+    const viewCount = countsBody.viewCount || countsTop.viewCount || 0;
+    const likeCount = countsBody.likeCount || countsTop.likeCount || 0;
+    const commentCount = countsBody.commentCount || countsTop.commentCount || 0;
+
     // Skip author parsing (unstable selectors; not needed for the user's sheet workflow).
     const authorName = "";
 
@@ -995,9 +1037,11 @@ async function parsePost(
       title: title || "",
       authorName,
       publishedAt,
-      viewCount: 0,
-      likeCount: 0,
-      commentCount: 0,
+      viewCount,
+      likeCount,
+      commentCount,
+      bodyText: bodyPlusSource,
+      commentsText,
       contentText,
       rawHtml,
       comments,
@@ -1089,8 +1133,15 @@ async function run(jobId: string) {
       for (const url of directUrls) {
         if (collected.length >= job.maxPosts) break;
         const clubid = getClubIdFromUrl(url) || "";
+        const membership = clubid
+          ? await prisma.cafeMembership.findUnique({ where: { cafeId: clubid } }).catch(() => null)
+          : null;
+        const cafeId = clubid || "direct";
+        const cafeName = membership?.name || clubid || "direct";
+        const cafeNumericId = clubid || "direct";
+
         const parsed = await withTimeout(
-          parsePost(page, url, clubid || "direct", clubid || "direct", clubid || "direct", ""),
+          parsePost(page, url, cafeId, cafeNumericId, cafeName, ""),
           90000,
           "parsePost overall"
         ).catch(() => null);
@@ -1159,9 +1210,10 @@ async function run(jobId: string) {
           }
 
           // Use counts from the search API list (more reliable than page text parsing).
-          parsed.viewCount = cand.readCount;
-          parsed.likeCount = cand.likeCount;
-          parsed.commentCount = cand.commentCount;
+          // Prefer page-extracted counts if present (it reflects current values).
+          if (!parsed.viewCount) parsed.viewCount = cand.readCount;
+          if (!parsed.likeCount) parsed.likeCount = cand.likeCount;
+          if (!parsed.commentCount) parsed.commentCount = cand.commentCount;
           if (cand.addedAt) parsed.publishedAt = cand.addedAt;
 
           if (!parsed.title || parsed.title.trim().length < 2) {
@@ -1217,6 +1269,8 @@ async function run(jobId: string) {
     viewCount: number;
     likeCount: number;
     commentCount: number;
+    bodyText: string;
+    commentsText: string;
     contentText: string;
   }>;
   const commentRows = [] as Array<any>;
@@ -1274,6 +1328,8 @@ async function run(jobId: string) {
       viewCount: post.viewCount,
       likeCount: post.likeCount,
       commentCount: post.commentCount,
+      bodyText: post.bodyText || "",
+      commentsText: post.commentsText || "",
       contentText: post.contentText,
     });
 

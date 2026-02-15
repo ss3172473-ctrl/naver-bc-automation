@@ -89,7 +89,11 @@ async function fetchJoinedCafes(storageState: any): Promise<JoinedCafe[]> {
           .map((el) => {
             const a = el as HTMLAnchorElement;
             const href = a.href || "";
-            const name = (a.textContent || "").trim();
+            const text = (a.textContent || "").trim();
+            const title = (a.getAttribute("title") || "").trim();
+            const aria = (a.getAttribute("aria-label") || "").trim();
+            // Prefer meaningful label when anchor text is empty (some cafe list UIs use icons/images).
+            const name = text || title || aria;
             return { href, name };
           })
           .filter((v) => v.href.includes("cafe.naver.com"))
