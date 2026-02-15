@@ -36,6 +36,10 @@ type SearchApiResponse = {
 };
 
 type SearchByMode = string;
+type DebugTarget = {
+  articleId: number | null;
+  subject: string | null;
+};
 
 const SEARCH_BY_MODES_DEFAULT: SearchByMode[] = ["ARTICLE_COMMENT", "2", "1"];
 const SEARCH_BY_MODES_ARTICLE_COMMENT: SearchByMode[] = ["ARTICLE_COMMENT", "2", "1"];
@@ -69,6 +73,13 @@ function resolveSearchByModes(explicitSearchBy: SearchByMode[] | null, taMode: S
 function parseIntSafe(v: unknown): number {
   const n = Number(String(v || "0").replace(/,/g, "").trim());
   return Number.isFinite(n) ? Math.max(0, n) : 0;
+}
+
+function normalizeForMatch(v: string): string {
+  return String(v || "")
+    .replace(/\\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -170,9 +181,49 @@ function parseInputToSearchParams(raw: string): {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (!args[0]) {
+  let debugTarget: DebugTarget = { articleId: null, subject: null };
+  const positionalArgs: string[] = [];
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = String(args[i]).trim();
+    if (arg === "--match-id" || arg === "--matchArticleId") {
+      const next = args[i + 1];
+      if (next && next !== "--match" && !next.startsWith("--")) {
+        const parsed = Number(String(next).trim());
+        if (Number.isFinite(parsed)) {
+          debugTarget.articleId = Math.floor(parsed);
+          i += 1;
+          continue;
+        }
+      }
+    }
+    if (arg === "--match") {
+      const next = args[i + 1];
+      if (next && !next.startsWith("--")) {
+        debugTarget.subject = String(next).trim();
+        i += 1;
+        continue;
+      }
+    }
+    if (arg.startsWith("--match-id=")) {
+      const parsed = Number(arg.split("=", 2)[1]);
+      if (Number.isFinite(parsed)) {
+        debugTarget.articleId = Math.floor(parsed);
+      }
+      continue;
+    }
+    if (arg.startsWith("--match=")) {
+      const value = arg.slice("--match=".length);
+      if (value) debugTarget.subject = value;
+      continue;
+    }
+
+    positionalArgs.push(arg);
+  }
+
+  if (!positionalArgs[0]) {
     throw new Error(
-      "usage: npx ts-node --project tsconfig.scripts.json scripts/debug-cafe-search.ts <cafeId> <keyword> [pages=4] [size=50] 또는 <카페검색 URL>"
+      "usage: npx ts-node --project tsconfig.scripts.json scripts/debug-cafe-search.ts <cafeId> <keyword> [pages=4] [size=50] [searchBy=1|2|ARTICLE_COMMENT] [--match \"제목\"] [--match-id 123]"
     );
   }
 
@@ -182,15 +233,15 @@ async function main() {
   let size = 50;
   let searchByModes = SEARCH_BY_MODES_DEFAULT;
 
-  if (/^https?:\/\//i.test(args[0])) {
-    const parsed = parseInputToSearchParams(args[0]);
+  if (/^https?:\/\//i.test(positionalArgs[0])) {
+    const parsed = parseInputToSearchParams(positionalArgs[0]);
     cafeId = parsed.cafeId;
     keyword = parsed.keyword;
     pages = parsed.pages;
     size = parsed.size;
     searchByModes = parsed.searchByModes;
   } else {
-    const [cafeIdArg, keywordArg, pagesArg, sizeArg, searchByArg] = args;
+    const [cafeIdArg, keywordArg, pagesArg, sizeArg, searchByArg] = positionalArgs;
     if (!cafeIdArg || !keywordArg) {
       throw new Error(
         "usage: npx ts-node --project tsconfig.scripts.json scripts/debug-cafe-search.ts <cafeId> <keyword> [pages=4] [size=50] [searchBy=1|2|ARTICLE_COMMENT]"
@@ -273,11 +324,19 @@ async function main() {
   }
 
   console.log(`TOTAL ${allRows.length}`);
-  const target = allRows.find((r) =>
-    r.subject.includes("트 top반") ||
-    r.subject.includes("폴리") ||
-    r.subject.includes("매그라면")
-  );
+  let target: SearchRow | undefined;
+  if (debugTarget.articleId) {
+    target = allRows.find((r) => r.articleId === debugTarget.articleId);
+  } else if (debugTarget.subject) {
+    const normalizedMatch = normalizeForMatch(debugTarget.subject);
+    target = allRows.find((r) => normalizeForMatch(r.subject).includes(normalizedMatch));
+  } else {
+    target = allRows.find((r) =>
+      r.subject.includes("트 top반") ||
+      r.subject.includes("폴리") ||
+      r.subject.includes("매그라면")
+    );
+  }
 
   if (target) {
     console.log("MATCH_TARGET", JSON.stringify(target));
