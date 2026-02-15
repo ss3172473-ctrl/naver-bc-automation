@@ -179,10 +179,11 @@ function cellStatusLabel(cell: JobProgressCell | null, jobStatus: "QUEUED" | "RU
 
 function cellMetaLine(cell: JobProgressCell | null) {
   if (!cell) return "-";
+  const t = Number(cell.totalResults ?? 0) || 0;
   const c = Number(cell.collected ?? 0) || 0;
   const s = Number(cell.skipped ?? 0) || 0;
   const f = Number(cell.filteredOut ?? 0) || 0;
-  return `수집 ${c} / 스킵 ${s} / 필터 ${f}`;
+  return `후보 ${t} / 수집 ${c} / 스킵 ${s} / 필터 ${f}`;
 }
 
 function cellPagesLine(cell: JobProgressCell | null) {
