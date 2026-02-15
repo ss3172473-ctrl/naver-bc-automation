@@ -46,6 +46,8 @@ type JobProgress = {
   candidates?: number;
   parseAttempts?: number;
   collected?: number;
+  sheetSynced?: number;
+  dbSynced?: number;
 };
 
 function parseJsonList(input: string | null): string[] {
@@ -555,6 +557,9 @@ export default function DashboardPage() {
                       : `조회 ${job.minViewCount ?? 0}+ / 댓글 ${job.minCommentCount ?? 0}+`;
 
                     const p = progressByJobId[job.id] || null;
+                    const runningResult = job.status === "RUNNING" && p
+                      ? `DB ${p?.dbSynced ?? 0} / Sheet ${p?.sheetSynced ?? 0}`
+                      : `DB ${job.resultCount} / Sheet ${job.sheetSynced}`;
                     const queuedPositionText = (() => {
                       if (job.status !== "QUEUED") return null;
                       const queued = jobs
@@ -581,8 +586,8 @@ export default function DashboardPage() {
                           typeof p?.parseAttempts === "number" ? `파싱:${p.parseAttempts}` : null,
                           typeof p?.collected === "number" ? `수집:${p.collected}` : null,
                         ]
-                          .filter(Boolean)
-                          .join(" ");
+                            .filter(Boolean)
+                            .join(" ");
                       }
                       if (job.status === "QUEUED") return queuedPositionText || "-";
                       return "-";
@@ -595,7 +600,7 @@ export default function DashboardPage() {
                         <td className="py-2 max-w-[180px] truncate" title={cafeText}>{cafeText}</td>
                         <td className="py-2">{filterText}</td>
                         <td className="py-2 max-w-[260px] truncate" title={progressText}>{progressText}</td>
-                        <td className="py-2">DB {job.resultCount} / Sheet {job.sheetSynced}</td>
+                        <td className="py-2">{runningResult}</td>
                         <td className="py-2">{job.status}</td>
                         <td className="py-2">
                           {job.status === "RUNNING" ? (

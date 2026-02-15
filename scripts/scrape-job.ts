@@ -6,7 +6,7 @@ import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Page, Frame } from "playwright";
 import { contentHash } from "../src/lib/scrape/hash";
-import { sendRowsToGoogleSheet } from "../src/lib/sheets";
+import { sendRowsToGoogleSheet, type SheetPostPayload } from "../src/lib/sheets";
 import { decryptString } from "../src/lib/crypto";
 import { telegramSendMessage } from "../src/lib/telegram";
 
@@ -117,6 +117,8 @@ type JobProgress = {
   candidates?: number;
   parseAttempts?: number;
   collected?: number;
+  sheetSynced?: number;
+  dbSynced?: number;
 };
 
 async function setJobProgress(jobId: string, patch: Partial<JobProgress>) {
@@ -1368,6 +1370,35 @@ async function run(jobId: string) {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   `);
   const collected: ParsedPost[] = [];
+  const sheetPending: SheetPostPayload[] = [];
+  const sheetState = { synced: 0, saved: 0 };
+
+  const flushSheetRows = async (force = false) => {
+    const shouldFlush = force ? sheetPending.length > 0 : sheetPending.length >= 1;
+    if (!shouldFlush) return;
+
+    const rowsToSend = [...sheetPending];
+    sheetPending.length = 0;
+
+    try {
+      await sendRowsToGoogleSheet(rowsToSend, []);
+      sheetState.synced += rowsToSend.length;
+      await prisma.scrapeJob
+        .update({
+          where: { id: job.id },
+          data: { sheetSynced: sheetState.synced },
+        })
+        .catch(() => undefined);
+      await setJobProgress(jobId, {
+        stage: "PARSE",
+        sheetSynced: sheetState.synced,
+        dbSynced: sheetState.saved,
+        collected: collected.length,
+      }).catch(() => undefined);
+    } catch (error) {
+      console.error("[sheet] batch sync failed", error);
+    }
+  };
 
   try {
     if (Array.isArray(directUrls) && directUrls.length > 0) {
@@ -1513,6 +1544,23 @@ async function run(jobId: string) {
           }
 
           collected.push(parsed);
+          sheetPending.push({
+            jobId,
+            sourceUrl: parsed.sourceUrl,
+            cafeId: parsed.cafeId,
+            cafeName: parsed.cafeName,
+            cafeUrl: parsed.cafeUrl,
+            title: parsed.title,
+            authorName: parsed.authorName,
+            publishedAt: parsed.publishedAt?.toISOString() || "",
+            viewCount: parsed.viewCount,
+            likeCount: parsed.likeCount,
+            commentCount: parsed.commentCount,
+            bodyText: parsed.bodyText || "",
+            commentsText: parsed.commentsText || "",
+            contentText: parsed.contentText,
+          });
+          await flushSheetRows().catch(() => undefined);
           await sleep(900 + Math.floor(Math.random() * 600));
         }
       }
@@ -1540,27 +1588,12 @@ async function run(jobId: string) {
     job.minCommentCount
   );
 
+  await flushSheetRows(true).catch(() => undefined);
+
   const finalPosts = filtered.slice(0, job.maxPosts);
   console.log(`[save] finalPosts=${finalPosts.length}`);
 
   let savedCount = 0;
-  const postRows = [] as Array<{
-    jobId: string;
-    sourceUrl: string;
-    cafeId: string;
-    cafeName: string;
-    cafeUrl: string;
-    title: string;
-    authorName: string;
-    publishedAt: string;
-    viewCount: number;
-    likeCount: number;
-    commentCount: number;
-    bodyText: string;
-    commentsText: string;
-    contentText: string;
-  }>;
-  const commentRows = [] as Array<any>;
 
   for (const post of finalPosts) {
     // Also keep a content hash for reference/secondary dedupe, but include URL to avoid false positives
@@ -1599,37 +1632,13 @@ async function run(jobId: string) {
 
       // comments disabled by user request
       savedCount += 1;
+      sheetState.saved += 1;
     }
-
-    postRows.push({
-      jobId,
-      sourceUrl: post.sourceUrl,
-      cafeId: post.cafeId,
-      cafeName: post.cafeName,
-      cafeUrl: post.cafeUrl,
-      title: post.title,
-      authorName: post.authorName,
-      publishedAt: post.publishedAt?.toISOString() || "",
-      viewCount: post.viewCount,
-      likeCount: post.likeCount,
-      commentCount: post.commentCount,
-      bodyText: post.bodyText || "",
-      commentsText: post.commentsText || "",
-      contentText: post.contentText,
-    });
   }
 
   const csvPath = writeCsv(jobId, finalPosts);
 
-  let syncedCount = 0;
-  try {
-    console.log(`[sheet] sending postRows=${postRows.length}`);
-    await sendRowsToGoogleSheet(postRows, commentRows);
-    syncedCount = postRows.length;
-    console.log(`[sheet] sent ok count=${syncedCount}`);
-  } catch (error) {
-    console.error("Google Sheet 동기화 실패:", error);
-  }
+  const syncedCount = sheetState.synced;
 
   console.log(`[job] updating SUCCESS saved=${savedCount} synced=${syncedCount}`);
   await setJobProgress(jobId, { stage: "DONE", collected: collected.length }).catch(() => undefined);
