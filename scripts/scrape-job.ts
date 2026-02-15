@@ -613,41 +613,91 @@ async function extractSourceLineText(target: Frame | Page): Promise<string> {
 }
 
 async function extractCommentsText(target: Frame | Page): Promise<string> {
-  // Scroll to the bottom to trigger comment rendering/lazy-load.
-  await (target as any)
-    .evaluate(() => window.scrollTo(0, document.body.scrollHeight))
-    .catch(() => undefined);
-  await sleep(600);
+  const itemSelCombined = ".CommentItem, li.CommentItem, [class*='CommentItem']";
 
-  // Some pages require opening the comments panel, but on others this button toggles the panel.
-  // Click only if we don't already see comment items.
-  await (target as any)
-    .waitForSelector(".CommentBox, .comment_list, .CommentItem", { timeout: 12000 })
-    .catch(() => undefined);
+  const cleanCommentBlock = (raw: string): string => {
+    const lines = String(raw || "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
 
-  const initialItems = await (target as any)
-    .locator(".CommentItem, li.CommentItem")
-    .count()
-    .catch(() => 0);
-  if (initialItems === 0) {
+    const dropExact = new Set([
+      "댓글",
+      "댓글알림",
+      "클린봇",
+      "등록",
+      "댓글을 입력하세요",
+      "신고",
+      "공유",
+      "URL 복사",
+    ]);
+
+    const dropIfIncludes = [
+      "클린봇 이 악성 댓글을 감지합니다",
+      "댓글알림",
+      "댓글을 입력하세요",
+      "댓글을 입력해주세요",
+    ];
+
+    const out = lines.filter((l) => {
+      if (dropExact.has(l)) return false;
+      if (dropIfIncludes.some((p) => l.includes(p))) return false;
+      return true;
+    });
+
+    return out.join("\n").trim();
+  };
+
+  // Scroll down in steps to trigger lazy-loading.
+  for (let i = 0; i < 4; i += 1) {
     await (target as any)
-      .locator("button.button_comment, a.button_comment")
-      .first()
-      .click({ timeout: 1200 })
+      .evaluate((ratio: number) => window.scrollTo(0, document.body.scrollHeight * ratio), (i + 1) / 4)
       .catch(() => undefined);
-    await sleep(400);
-    await (target as any)
-      .waitForSelector(".CommentItem, li.CommentItem", { timeout: 12000 })
-      .catch(() => undefined);
+    await sleep(450);
   }
 
-  const commentRoot = (target as any).locator(".CommentBox, .comment_list").first();
-  const hasRoot = (await commentRoot.count().catch(() => 0)) > 0;
-  const scope = hasRoot ? commentRoot : (target as any);
+  // Sometimes the comments are behind a "댓글" button/tab.
+  const openCommentButtons = [
+    "button.button_comment",
+    "a.button_comment",
+    "[role='button'][class*='comment']",
+    "button, a",
+  ];
+  const openRegex = /댓글\s*\d*|댓글\s*보기|댓글\s*열기/i;
 
-  // Expand comment "더보기" buttons if present.
-  const expandRegex = /댓글\s*더보기|이전\s*댓글|더보기|more/i;
+  const tryOpen = async () => {
+    for (const sel of openCommentButtons) {
+      const btn = (target as any).locator(sel).filter({ hasText: openRegex }).first();
+      const c = await btn.count().catch(() => 0);
+      if (c <= 0) continue;
+      await btn.click({ timeout: 1500 }).catch(() => undefined);
+      await sleep(600);
+      break;
+    }
+  };
+
+  // Wait/retry until comment items appear (headless can be slow).
+  let globalCount = 0;
   for (let attempt = 0; attempt < 6; attempt += 1) {
+    globalCount = await (target as any).locator(itemSelCombined).count().catch(() => 0);
+    if (globalCount > 0) break;
+    if (attempt === 0 || attempt === 2) await tryOpen();
+    await (target as any)
+      .evaluate(() => window.scrollTo(0, document.body.scrollHeight))
+      .catch(() => undefined);
+    await sleep(700);
+  }
+
+  if (globalCount <= 0) return "";
+
+  // Pick a sensible scope. Sometimes ".CommentBox" exists but doesn't contain actual items.
+  const commentRoot = (target as any).locator(".CommentBox, .comment_list, [class*='CommentBox']").first();
+  const rootCount = await commentRoot.locator(itemSelCombined).count().catch(() => 0);
+  const scope = rootCount > 0 ? commentRoot : (target as any);
+
+  // Expand comment "더보기" buttons if present (within comment scope only).
+  const expandRegex = /댓글\s*더보기|이전\s*댓글|더보기|more/i;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     const btn = scope
       .locator("button, a, span")
       .filter({ hasText: expandRegex })
@@ -655,34 +705,33 @@ async function extractCommentsText(target: Frame | Page): Promise<string> {
     const count = await btn.count().catch(() => 0);
     if (count === 0) break;
     await btn.click({ timeout: 1500 }).catch(() => undefined);
-    await sleep(250);
+    await sleep(300);
   }
 
-  const itemSelectors = [
-    ".CommentItem",
-    "li.CommentItem",
-    "[class*='CommentItem']",
-    "li[class*='comment']",
-  ];
+  const items = scope.locator(itemSelCombined);
+  const n = await items.count().catch(() => 0);
+  if (n <= 0) return "";
 
-  for (const sel of itemSelectors) {
-    const items = scope.locator(sel);
-    const n = await items.count().catch(() => 0);
-    if (n <= 0) continue;
-    const take = Math.min(n, 200);
-    const parts: string[] = [];
-    for (let i = 0; i < take; i += 1) {
-      const item = items.nth(i);
-      // Use the whole comment item's visible text so we keep:
-      // nickname, comment body, timestamp, and "답글쓰기" (like copy/paste on screen).
-      const raw = String(await item.innerText().catch(() => "")).trim();
-      if (raw) parts.push(raw);
+  const take = Math.min(n, 250);
+  const parts: string[] = [];
+  for (let i = 0; i < take; i += 1) {
+    const item = items.nth(i);
+    let raw = String(await item.innerText().catch(() => "")).trim();
+    if (!raw) continue;
+
+    // Some copy/paste views include a "프로필 사진" line. Add it if the comment has an image and it's missing.
+    const hasImg = (await item.locator("img").count().catch(() => 0)) > 0;
+    if (hasImg && !raw.includes("프로필")) {
+      raw = `프로필 사진\n${raw}`;
     }
-    const joined = parts.join("\n\n").trim();
-    if (joined.length >= 10) return joined;
+
+    const cleaned = cleanCommentBlock(raw);
+    if (cleaned.length < 3) continue;
+    parts.push(cleaned);
   }
 
-  return "";
+  const joined = parts.join("\n\n").trim();
+  return joined;
 }
 
 function getQueryParam(url: string, key: string): string | null {
