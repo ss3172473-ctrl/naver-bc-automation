@@ -179,6 +179,40 @@ const JOB_STATUS_LABELS: Record<string, string> = {
   CANCELLED: "중단됨",
 };
 
+function buildDisplayBadge(status: string, job: ScrapeJob, p: JobProgress | null) {
+  const normalized = normalizeStatus(status);
+  if (normalized === "SUCCESS") {
+    const resultCount = Number(job.resultCount ?? 0);
+    const maxPosts = Number(job.maxPosts ?? 0);
+    const badgeText = resultCount > 0
+      ? `✅ 완료 (${resultCount}${maxPosts > 0 ? `/${maxPosts}` : ""})`
+      : "✅ 완료";
+    return { label: badgeText, style: "bg-emerald-100 text-emerald-800" };
+  }
+
+  if (normalized === "FAILED") {
+    return { label: "실패", style: "bg-red-100 text-red-700" };
+  }
+
+  if (normalized === "CANCELLED") {
+    return { label: "중단됨", style: "bg-slate-200 text-slate-700" };
+  }
+
+  if (normalized === "RUNNING") {
+    return { label: "실행 중", style: "bg-blue-100 text-blue-800" };
+  }
+
+  if (normalized === "QUEUED") {
+    const isQueuedWithProgress = isProgressActive(p);
+    return {
+      label: isQueuedWithProgress ? "실행 중(진입 중)" : "실행 대기",
+      style: isQueuedWithProgress ? "bg-blue-100 text-blue-800" : "bg-amber-100 text-amber-800",
+    };
+  }
+
+  return { label: normalized || "대기", style: "bg-slate-100 text-slate-700" };
+}
+
 function formatCellStatus(
   cell: JobProgressCell | null,
   runningContext: {
@@ -240,6 +274,17 @@ function normalizeStatus(status: string) {
   return String(status || "").toUpperCase();
 }
 
+const KNOWN_JOB_STATUSES = ["QUEUED", "RUNNING", "SUCCESS", "FAILED", "CANCELLED"] as const;
+
+type JobStatus = (typeof KNOWN_JOB_STATUSES)[number];
+
+function normalizeJobStatus(status: string): JobStatus {
+  const key = normalizeStatus(status);
+  if (key === "DONE") return "SUCCESS";
+  if ((KNOWN_JOB_STATUSES as readonly string[]).includes(key)) return key as JobStatus;
+  return "QUEUED";
+}
+
 function isProgressActive(progress: JobProgress | null | undefined) {
   const stage = normalizeStatus(progress?.stage || "");
   if (!stage) return false;
@@ -248,13 +293,24 @@ function isProgressActive(progress: JobProgress | null | undefined) {
 }
 
 function resolveDisplayStatus(status: string, progress: JobProgress | null) {
-  const key = normalizeStatus(status);
+  const jobStatus = normalizeJobStatus(status);
+  if (jobStatus === "RUNNING" || jobStatus === "SUCCESS" || jobStatus === "FAILED" || jobStatus === "CANCELLED") {
+    return jobStatus;
+  }
   const stage = normalizeStatus(progress?.stage || "");
+  if (jobStatus === "QUEUED") {
+    if (stage === "DONE") return "SUCCESS";
+    if (stage === "FAILED") return "FAILED";
+    if (stage === "CANCELLED") return "CANCELLED";
+    if (isProgressActive(progress)) return "RUNNING";
+    return "QUEUED";
+  }
+
   if (stage === "DONE") return "SUCCESS";
   if (stage === "FAILED") return "FAILED";
   if (stage === "CANCELLED") return "CANCELLED";
-  if (key === "RUNNING" || isProgressActive(progress)) return "RUNNING";
-  return key || "QUEUED";
+  if (isProgressActive(progress)) return "RUNNING";
+  return jobStatus;
 }
 
 function getJobResultTextByStatus(
@@ -415,23 +471,28 @@ export default function DashboardPage() {
 
   const jobStatusSummary = useMemo(() => {
     const total = jobs.length;
-    const queue = jobs.filter((job) => {
-      const display = resolveDisplayStatus(job.status, progressByJobId[job.id] || null);
-      return display === "QUEUED";
-    }).length;
-    const running = jobs.filter((job) => {
-      const display = resolveDisplayStatus(job.status, progressByJobId[job.id] || null);
-      return display === "RUNNING";
-    }).length;
-    const success = jobs.filter((job) => job.status === "SUCCESS").length;
-    const failed = jobs.filter((job) => job.status === "FAILED").length;
-    const cancelled = jobs.filter((job) => job.status === "CANCELLED").length;
+    let queue = 0;
+    let running = 0;
+    let success = 0;
+    let failed = 0;
+    let cancelled = 0;
+
+    for (const job of jobs) {
+      const p = progressByJobId[job.id] || null;
+      const display = resolveDisplayStatus(job.status, p);
+      if (display === "QUEUED") queue += 1;
+      else if (display === "RUNNING") running += 1;
+      else if (display === "SUCCESS") success += 1;
+      else if (display === "FAILED") failed += 1;
+      else if (display === "CANCELLED") cancelled += 1;
+    }
     return { total, queue, running, success, failed, cancelled };
   }, [jobs, progressByJobId]);
 
   const activeJobs = useMemo(() => {
     return jobs.filter((job) => {
-      const display = resolveDisplayStatus(job.status, progressByJobId[job.id] || null);
+      const p = progressByJobId[job.id] || null;
+      const display = resolveDisplayStatus(job.status, p);
       return display === "RUNNING" || display === "QUEUED";
     });
   }, [jobs, progressByJobId]);
@@ -995,7 +1056,7 @@ export default function DashboardPage() {
                       const effectiveStatus = resolveDisplayStatus(job.status, p);
                       const isRunning = effectiveStatus === "RUNNING";
                       const action = getJobUiState(effectiveStatus, job.id);
-                      const rawStatus = normalizeStatus(job.status);
+                      const statusBadge = buildDisplayBadge(effectiveStatus, job, p);
                       const progressText = isRunning
                         ? [
                             p?.stage ? `단계: ${getStageLabel(p.stage)}` : "단계: 대기",
@@ -1013,9 +1074,6 @@ export default function DashboardPage() {
                       const percent = isRunning ? getProgressPercent(p?.stage) : 15;
                       const updatedAt = p?.updatedAt ? formatAgo(p.updatedAt) : "업데이트 없음";
                       const stepIndex = isRunning ? getPipelineIndex(p?.stage) : 1;
-                      const statusKey = effectiveStatus;
-                      const mismatchStatusDebug = rawStatus !== statusKey ? `서버=${rawStatus} / 진행=${p?.stage || "없음"}` : "";
-
                           const matrixData = isRunning ? buildMatrixRows(job, p) : null;
                           const hasMatrixGrid = !!(matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0);
                           const matrixText = hasMatrixGrid
@@ -1026,18 +1084,13 @@ export default function DashboardPage() {
                             <div key={job.id} className="border border-slate-200 rounded-lg p-3">
                           <div className="flex flex-wrap items-center gap-2 mb-2">
                             <p className="font-semibold text-black">{new Date(job.createdAt).toLocaleString("ko-KR")}</p>
-                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(statusKey)}`}>
-                              {JOB_STATUS_LABELS[statusKey] || statusKey || "대기"}
+                            <span className={`text-xs px-2 py-1 rounded-full ${statusBadge.style}`}>
+                              {statusBadge.label}
                             </span>
                             <span className="text-xs text-slate-600">업데이트: {updatedAt}</span>
                             <span className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-full">
                               {action.label}
                             </span>
-                            {mismatchStatusDebug ? (
-                              <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-1">
-                                상태 진단: {mismatchStatusDebug}
-                              </span>
-                            ) : null}
                             {isRunning ? (
                               <button
                                 onClick={() => cancelJob(job.id)}
@@ -1498,8 +1551,7 @@ export default function DashboardPage() {
                         return "-";
                       })();
                       const action = getJobUiState(displayStatus, job.id);
-                      const jobStatusText = JOB_STATUS_LABELS[displayStatus] || displayStatus;
-                      const statusMismatchText = normalizeStatus(job.status) !== displayStatus ? `(진단 ${normalizeStatus(job.status)}->${displayStatus})` : "";
+                      const listBadge = buildDisplayBadge(displayStatus, job, p);
 
                       return (
                         <tr key={job.id} className="border-b border-slate-100">
@@ -1515,12 +1567,9 @@ export default function DashboardPage() {
                           ) : null}
                         </td>
                           <td className="py-2">
-                            <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(displayStatus)}`}>
-                              {jobStatusText}
+                            <span className={`text-xs px-2 py-1 rounded-full ${listBadge.style}`}>
+                              {listBadge.label}
                             </span>
-                            {statusMismatchText ? (
-                              <span className="text-xs text-amber-700">{statusMismatchText}</span>
-                            ) : null}
                           </td>
                           <td className="py-2">
                             {displayStatus === "RUNNING" ? (
