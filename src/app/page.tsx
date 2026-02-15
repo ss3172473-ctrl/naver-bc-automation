@@ -292,23 +292,35 @@ function isProgressActive(progress: JobProgress | null | undefined) {
   return true;
 }
 
+function mapProgressStageToStatus(
+  stage: string
+): "RUNNING" | "SUCCESS" | "FAILED" | "CANCELLED" | null {
+  const normalized = normalizeStatus(stage);
+  if (normalized === "DONE") return "SUCCESS";
+  if (normalized === "FAILED") return "FAILED";
+  if (normalized === "CANCELLED") return "CANCELLED";
+  if (normalized === "SEARCH" || normalized === "PARSE") return "RUNNING";
+  return null;
+}
+
 function resolveDisplayStatus(status: string, progress: JobProgress | null) {
   const jobStatus = normalizeJobStatus(status);
+  const stage = normalizeStatus(progress?.stage || "");
+  const stageStatus = mapProgressStageToStatus(stage);
+
+  if (stageStatus) {
+    return stageStatus;
+  }
+
   if (jobStatus === "RUNNING" || jobStatus === "SUCCESS" || jobStatus === "FAILED" || jobStatus === "CANCELLED") {
     return jobStatus;
   }
-  const stage = normalizeStatus(progress?.stage || "");
+
   if (jobStatus === "QUEUED") {
-    if (stage === "DONE") return "SUCCESS";
-    if (stage === "FAILED") return "FAILED";
-    if (stage === "CANCELLED") return "CANCELLED";
     if (isProgressActive(progress)) return "RUNNING";
     return "QUEUED";
   }
 
-  if (stage === "DONE") return "SUCCESS";
-  if (stage === "FAILED") return "FAILED";
-  if (stage === "CANCELLED") return "CANCELLED";
   if (isProgressActive(progress)) return "RUNNING";
   return jobStatus;
 }

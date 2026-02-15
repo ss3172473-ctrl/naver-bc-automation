@@ -172,7 +172,7 @@ function makeProgressPairKey(cafeId: string, keyword: string): string {
 async function setJobProgress(
   jobId: string,
   patch: Partial<JobProgress>,
-  pair?: KeywordProgressPatch
+  pairOrPairs?: KeywordProgressPatch | KeywordProgressPatch[] | null
 ) {
   const key = progressKey(jobId);
   const now = new Date().toISOString();
@@ -201,7 +201,14 @@ async function setJobProgress(
   };
 
   const matrix = { ...(next.keywordMatrix || {}) };
-  if (pair?.cafeId && pair.keyword) {
+  const pairs = pairOrPairs
+    ? Array.isArray(pairOrPairs)
+      ? pairOrPairs
+      : [pairOrPairs]
+    : [];
+
+  for (const pair of pairs) {
+    if (!pair?.cafeId || !pair.keyword) continue;
     const pairKey = makeProgressPairKey(pair.cafeId, pair.keyword);
     const existingCell = matrix[pairKey] || {};
     matrix[pairKey] = {
@@ -230,6 +237,21 @@ async function isCancelRequested(jobId: string): Promise<boolean> {
   const row = await prisma.setting.findUnique({ where: { key: cancelKey(jobId) } }).catch(() => null);
   const v = String(row?.value || "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";
+}
+
+async function assertNotCancelled(jobId: string, contextMessage: string): Promise<void> {
+  const cancelled = await isCancelRequested(jobId);
+  if (!cancelled) return;
+  await setJobProgress(jobId, { stage: "CANCELLED", message: contextMessage }).catch(() => undefined);
+  throw new Error("cancelled");
+}
+
+async function isJobMarkedCancelled(jobId: string): Promise<boolean> {
+  const [requested, job] = await Promise.all([
+    isCancelRequested(jobId).catch(() => false),
+    prisma.scrapeJob.findUnique({ where: { id: jobId }, select: { status: true } }).catch(() => null),
+  ]);
+  return requested || job?.status === "CANCELLED";
 }
 
 async function clearCancelAndProgress(jobId: string) {
@@ -1272,6 +1294,7 @@ async function collectCandidatesForKeyword(
   page: Page,
   cafeNumericId: string,
   keyword: string,
+  jobId: string,
   perKeywordTake: number,
   excludedBoards: Set<string>,
   fromDate: Date | null,
@@ -1289,6 +1312,7 @@ async function collectCandidatesForKeyword(
   const effectiveTake = Math.max(1, Math.min(perKeywordTake, 200));
 
   for (let pageNo = 1; pageNo <= hardCapPages; pageNo += 1) {
+    await assertNotCancelled(jobId, `cancel requested (search page=${pageNo})`);
     const pageRows = await fetchCandidatesFromSearchApiPage(page, cafeNumericId, keyword, pageNo).catch(() => []);
     if (pageRows.length === 0) break;
     fetched += pageRows.length;
@@ -1780,6 +1804,41 @@ async function run(jobId: string) {
   const cafeNames = parseJsonStringArray(job.cafeNames);
   const excludedBoardTokens = new Set(excludeBoards.map((value) => normalizeBoardToken(value)));
 
+  await assertNotCancelled(jobId, "cancel requested before execution");
+
+  const initialMatrix: KeywordProgressPatch[] = [];
+  for (const [cafeIndex, cafeId] of cafeIds.entries()) {
+    const cafeName = cafeNames[cafeIndex] || cafeId || "unknown";
+    for (const rawKeyword of keywords) {
+      const keyword = String(rawKeyword || "").trim();
+      if (!keyword) continue;
+      initialMatrix.push({
+        cafeId,
+        cafeName,
+        keyword,
+        status: "queued",
+        searched: 0,
+        totalResults: 0,
+        collected: 0,
+        skipped: 0,
+        filteredOut: 0,
+      });
+    }
+  }
+  await setJobProgress(
+    jobId,
+    {
+      stage: "SEARCH",
+      cafeIndex: 1,
+      cafeTotal: cafeIds.length,
+      keywordIndex: 0,
+      keywordTotal: keywords.length || 0,
+      candidates: 0,
+      collected: 0,
+    },
+    initialMatrix
+  ).catch(() => undefined);
+
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     storageState,
@@ -1838,6 +1897,7 @@ async function run(jobId: string) {
       console.log(`[run] directUrls mode urls=${directUrls.length}`);
       const metaMap = await buildClubIdToCafeMetaMap(page).catch(() => new Map());
       for (const url of directUrls) {
+        await assertNotCancelled(jobId, `cancel requested (direct url: ${url})`);
         if (await isCancelRequested(jobId)) {
           await setJobProgress(jobId, { stage: "CANCELLED", message: "cancel requested" }).catch(() => undefined);
           throw new Error("cancelled");
@@ -1876,6 +1936,7 @@ async function run(jobId: string) {
       }
     } else {
       for (let i = 0; i < cafeIds.length; i += 1) {
+        await assertNotCancelled(jobId, `cancel requested (cafe index=${i + 1})`);
         if (await isCancelRequested(jobId)) {
           await setJobProgress(jobId, { stage: "CANCELLED", message: "cancel requested" }).catch(() => undefined);
           throw new Error("cancelled");
@@ -1939,6 +2000,7 @@ async function run(jobId: string) {
         const parseBudget = Math.max(20, job.maxPosts * 2);
 
         for (let k = 0; k < keywords.length; k += 1) {
+          await assertNotCancelled(jobId, `cancel requested (keyword index=${k + 1})`);
           const keyword = keywords[k] || "";
           const keywordStartCollected = collected.length;
           let keywordSkipped = 0;
@@ -1971,6 +2033,7 @@ async function run(jobId: string) {
             page,
             cafeNumericId,
             keyword,
+            job.id,
             Math.max(1, Math.ceil(remainingForCafe / Math.max(1, keywords.length - k))),
             excludedBoardTokens,
             job.fromDate || null,
@@ -2337,6 +2400,23 @@ async function run(jobId: string) {
   const syncedCount = sheetState.synced;
 
   console.log(`[job] updating SUCCESS saved=${savedCount} synced=${syncedCount}`);
+  const forceCancelled = await isJobMarkedCancelled(jobId);
+  if (forceCancelled) {
+    await setJobProgress(jobId, { stage: "CANCELLED", message: "cancelled by user" }).catch(() => undefined);
+    await prisma.scrapeJob.update({
+      where: { id: jobId },
+      data: {
+        status: "CANCELLED",
+        errorMessage: "cancelled by user",
+        resultCount: savedCount,
+        sheetSynced: syncedCount,
+        resultPath: csvPath,
+        completedAt: new Date(),
+      },
+    });
+    return;
+  }
+
   await setJobProgress(jobId, { stage: "DONE", collected: collected.length }).catch(() => undefined);
   await prisma.scrapeJob.update({
     where: { id: jobId },
@@ -2370,7 +2450,7 @@ async function main() {
     await run(jobId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const cancelled = message === "cancelled";
+    const cancelled = (message === "cancelled") || (await isJobMarkedCancelled(jobId));
     await prisma.scrapeJob
       .update({
         where: { id: jobId },
@@ -2383,6 +2463,8 @@ async function main() {
       .catch(() => undefined);
     if (cancelled) {
       await setJobProgress(jobId, { stage: "CANCELLED", message: "cancelled by user" }).catch(() => undefined);
+    } else {
+      await setJobProgress(jobId, { stage: "FAILED", message: message || "scrape failed" }).catch(() => undefined);
     }
 
     const job = await prisma.scrapeJob.findUnique({ where: { id: jobId } }).catch(() => null);

@@ -8,6 +8,10 @@ function cancelKey(jobId: string) {
   return `scrapeJobCancel:${jobId}`;
 }
 
+function progressKey(jobId: string) {
+  return `scrapeJobProgress:${jobId}`;
+}
+
 export async function POST(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -49,6 +53,33 @@ export async function POST(
   }
 
   // Mark cancel requested; worker will stop gracefully.
+  const progress = await prisma.setting.findUnique({ where: { key: progressKey(id) } }).catch(() => null);
+  const previous = (() => {
+    if (!progress?.value) return {};
+    try {
+      const parsed = JSON.parse(progress.value);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // ignore
+    }
+    return {};
+  })();
+  const nextProgress = {
+    ...previous,
+    stage: "CANCELLED",
+    message: "cancel requested",
+    updatedAt: new Date().toISOString(),
+  } as Record<string, unknown>;
+  await prisma.setting.upsert({
+    where: { key: progressKey(id) },
+    create: {
+      key: progressKey(id),
+      value: JSON.stringify(nextProgress),
+    },
+    update: {
+      value: JSON.stringify(nextProgress),
+    },
+  });
   await prisma.setting.upsert({
     where: { key: cancelKey(id) },
     create: { key: cancelKey(id), value: "true" },
