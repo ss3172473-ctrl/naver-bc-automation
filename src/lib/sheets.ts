@@ -17,6 +17,8 @@ export interface SheetPostPayload {
 
 // Google Sheets has a per-cell character limit (commonly ~50k). We keep a safety margin
 // to avoid Apps Script setValues failures, while storing the full text in DB/CSV.
+const SHEET_POSTS_V2_KEY = "postRowsV2";
+
 function clampForSheetCell(input: string, maxChars = 45000): string {
   const s = input || "";
   if (s.length <= maxChars) return s;
@@ -42,8 +44,8 @@ export async function sendRowsToGoogleSheet(
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // Fixed to write only to posts_v2 (single sheet) to avoid duplicate sheet creation.
-    body: JSON.stringify({ postRowsV2: safePostRows }),
+    // Always send one payload only => posts_v2 sheet only.
+    body: JSON.stringify({ [SHEET_POSTS_V2_KEY]: safePostRows }),
   });
 
   if (!response.ok) {
