@@ -524,33 +524,6 @@ export default function DashboardPage() {
     }
   }, [normalizeExcludeBoardValue, saveExcludeBoardsPreference]);
 
-  useEffect(() => {
-    const running = jobs.filter((j) => j.status === "RUNNING");
-    if (running.length === 0) return;
-
-    let alive = true;
-    const tick = async () => {
-      for (const j of running) {
-        if (!alive) return;
-        await fetchProgress(j.id);
-      }
-    };
-
-    tick();
-    const t = setInterval(tick, 4000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [jobs, fetchProgress]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchBoardCandidates();
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [selectedCafeIds, keywordList, fetchBoardCandidates]);
-
   const fetchCafes = async () => {
     try {
       setCafesLoading(true);
@@ -633,6 +606,33 @@ export default function DashboardPage() {
     }
   }, [keywordList, selectedCafeIds, selectedExcludeBoards]);
 
+  useEffect(() => {
+    const running = jobs.filter((j) => j.status === "RUNNING");
+    if (running.length === 0) return;
+
+    let alive = true;
+    const tick = async () => {
+      for (const j of running) {
+        if (!alive) return;
+        await fetchProgress(j.id);
+      }
+    };
+
+    tick();
+    const t = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [jobs, fetchProgress]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchBoardCandidates();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [selectedCafeIds, keywordList, fetchBoardCandidates]);
+
   const toggleCafe = (cafeId: string) => {
     setSelectedCafeIds((prev) =>
       prev.includes(cafeId) ? prev.filter((id) => id !== cafeId) : [...prev, cafeId]
@@ -687,18 +687,23 @@ export default function DashboardPage() {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        const detail =
-          typeof data.details === "string" && data.details.trim()
-            ? `\n\n상세: ${data.details}`
-            : "";
-        alert((data.error || "작업 생성 실패") + detail);
-        return;
-      }
+      try {
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          const detail =
+            typeof data.details === "string" && data.details.trim()
+              ? `\n\n상세: ${data.details}`
+              : "";
+          alert((data.error || "작업 생성 실패") + detail);
+          return;
+        }
 
-      await fetchJobs();
-      await startJob(data.data.id);
+        await fetchJobs();
+        await startJob(data.data.id);
+      } catch {
+        const raw = await res.text().catch(() => "");
+        alert(`작업 생성 요청 실패(파싱 오류)\n\n${raw || "응답을 읽을 수 없습니다."}`);
+      }
     } finally {
       setCreating(false);
     }

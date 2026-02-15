@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getCurrentUser } from "@/lib/auth";
 
+export const runtime = "nodejs";
+
 function parseStringList(input: unknown): string[] {
   // Accept both JSON-style arrays and comma-separated strings.
   if (Array.isArray(input)) {
@@ -33,18 +35,38 @@ function parseUrlLines(input: unknown): string[] {
     .filter(Boolean);
 }
 
+function toDateValue(input: unknown): Date | null {
+  if (input === null || input === undefined || input === "") return null;
+
+  if (input instanceof Date) {
+    return Number.isNaN(input.getTime()) ? null : input;
+  }
+
+  if (typeof input === "string" || typeof input === "number") {
+    const parsed = new Date(input);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  if (typeof input === "object") {
+    const value = (input as { value?: unknown }).value;
+    if (typeof value === "string" || typeof value === "number") {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+  }
+
+  return null;
+}
+
 function formatCreateError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const code = (error as { code?: string } | undefined)?.code;
 
   if (code) {
     if (code === "P1001") {
-      return "데이터베이스 연결 실패. DATABASE_URL이 유효한지 확인하세요. (P1001)";
+      return "데이터베이스 연결 실패. DATABASE_URL이 유효하지 않거나 네트워크가 차단되었습니다. (P1001)";
     }
     return `[${code}] ${message}`;
-  }
-  if (process.env.NODE_ENV === "production") {
-    return "스크랩 작업 생성 중 오류가 발생했습니다.";
   }
   return message || "알 수 없는 오류";
 }
@@ -127,8 +149,8 @@ export async function POST(request: NextRequest) {
     const excludeKeywords = parseStringList(body?.excludeKeywords);
     const excludeBoards = parseStringList(body?.excludeBoards);
 
-    const fromDate = body?.fromDate ? new Date(body.fromDate) : null;
-    const toDate = body?.toDate ? new Date(body.toDate) : null;
+    const fromDate = toDateValue(body?.fromDate);
+    const toDate = toDateValue(body?.toDate);
     const minViewCountRaw =
       body?.minViewCount === null || body?.minViewCount === undefined
         ? null
@@ -180,13 +202,10 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("스크랩 작업 생성 실패:", error);
     const details = formatCreateError(error);
-    const isKnownError =
-      details.includes("데이터베이스 연결 실패") || details.includes("[P1001]");
-
     return NextResponse.json(
       {
         success: false,
-        error: isKnownError ? details : "스크랩 작업 생성 중 오류가 발생했습니다.",
+        error: details || "스크랩 작업 생성 중 오류가 발생했습니다.",
         details,
       },
       { status: 500 }
