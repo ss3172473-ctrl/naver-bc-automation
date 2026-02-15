@@ -1414,6 +1414,26 @@ async function collectCandidatesForKeyword(
     } catch (error) {
       // Treat transient API errors as a retryable failure and continue scanning later pages.
       console.warn(`[search] page fetch failed: cafe=${cafeNumericId} keyword=${keyword} page=${pageNo}`, error);
+      pagesScanned = pageNo;
+      await setJobProgress(
+        jobId,
+        {},
+        {
+          cafeId,
+          cafeName,
+          keyword,
+          status: "searching",
+          pagesScanned,
+          pagesTarget: hardCapPages,
+          perPage: SEARCH_API_PAGE_SIZE,
+          fetchedRows: fetched,
+          searched: fetched,
+          totalResults: candidates.length,
+          collected: 0,
+          skipped: 0,
+          filteredOut: excludedByBoard,
+        }
+      ).catch(() => undefined);
       await sleep(300 + Math.floor(Math.random() * 200));
       continue;
     }
