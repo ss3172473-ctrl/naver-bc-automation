@@ -199,7 +199,7 @@ export default function DashboardPage() {
   const [minViewCount, setMinViewCount] = useState("");
   const [minCommentCount, setMinCommentCount] = useState("");
   const [useAutoFilter, setUseAutoFilter] = useState(true);
-  const [maxPosts, setMaxPosts] = useState(80);
+  const [maxPostsInput, setMaxPostsInput] = useState("");
   const [creating, setCreating] = useState(false);
   const [startingJobId, setStartingJobId] = useState<string | null>(null);
   const [progressByJobId, setProgressByJobId] = useState<Record<string, JobProgress | null>>({});
@@ -609,14 +609,18 @@ export default function DashboardPage() {
           minViewCount: minViewCount === "" ? null : Number(minViewCount),
           minCommentCount: minCommentCount === "" ? null : Number(minCommentCount),
           useAutoFilter,
-          maxPosts,
+          maxPosts: maxPostsInput.trim() === "" ? null : Number(maxPostsInput),
           selectedCafes,
         }),
       });
 
       const data = await res.json();
       if (!res.ok || !data.success) {
-        alert(data.error || "작업 생성 실패");
+        const detail =
+          typeof data.details === "string" && data.details.trim()
+            ? `\n\n상세: ${data.details}`
+            : "";
+        alert((data.error || "작업 생성 실패") + detail);
         return;
       }
 
@@ -1006,7 +1010,15 @@ export default function DashboardPage() {
 
             <div>
               <label className="text-sm text-slate-700">최대 수집 글 수</label>
-              <input type="number" min={1} max={300} value={maxPosts} onChange={(e) => setMaxPosts(Number(e.target.value) || 80)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" />
+              <input
+                type="number"
+                min={1}
+                max={300}
+                value={maxPostsInput}
+                placeholder={`${recommendedMaxPosts}`}
+                onChange={(e) => setMaxPostsInput(e.target.value)}
+                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black"
+              />
               <div className="mt-1 text-xs text-slate-600">
                 권장: {recommendedMaxPosts} (절대 상한: 300). 키워드/카페가 많으면 낮게 잡는 게 안정적입니다.
               </div>
