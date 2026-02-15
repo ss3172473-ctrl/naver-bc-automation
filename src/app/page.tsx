@@ -230,7 +230,7 @@ function formatCellStatus(
     }
 
     if (runningContext.isCurrent) {
-      return "대기";
+      return "진행중";
     }
 
     const currentCafe = Number(runningContext.currentCafeIndex);
@@ -240,7 +240,7 @@ function formatCellStatus(
         runningContext.cafeIndex < currentCafe ||
         (runningContext.cafeIndex === currentCafe && runningContext.keywordIndex <= currentKeyword)
       ) {
-        return "확인중";
+        return "완료";
       }
     }
     return "예정";

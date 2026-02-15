@@ -1142,6 +1142,66 @@ async function fetchCandidatesFromSearchApi(
   return rows;
 }
 
+async function fetchCandidatesFromSearchApiPage(
+  page: Page,
+  cafeNumericId: string,
+  keyword: string,
+  pageNum: number
+): Promise<ArticleCandidate[]> {
+  const rows: ArticleCandidate[] = [];
+
+  const url =
+    `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
+    `?cafeId=${encodeURIComponent(cafeNumericId)}` +
+    `&query=${encodeURIComponent(keyword)}` +
+    `&searchBy=1&sortBy=date&page=${pageNum}&perPage=20` +
+    `&adUnit=MW_CAFE_BOARD&ad=true`;
+
+  const resp = await page.request.get(url);
+  if (!resp.ok()) return [];
+
+  const json = await resp.json();
+  const list = json?.message?.result?.articleList || [];
+  if (!Array.isArray(list) || list.length === 0) return [];
+
+  for (const row of list) {
+    if (row?.type !== "ARTICLE") continue;
+    const item = row.item;
+    if (!item?.articleId) continue;
+
+    const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
+    const addedAtSafe = parseNaverCafeDate(item.addDate);
+    const boardName = String(
+      item.boardName ||
+        item.boardTitle ||
+        item.menuName ||
+        item.menu ||
+        item.menuTitle ||
+        item.board ||
+        ""
+    ).trim();
+
+    rows.push({
+      articleId: Number(item.articleId),
+      url:
+        // PC article read URL is the most reliable for extracting 본문 text (it uses the cafe_main frame).
+        `https://cafe.naver.com/ArticleRead.nhn` +
+        `?clubid=${encodeURIComponent(cafeNumericId)}` +
+        `&articleid=${encodeURIComponent(String(item.articleId))}`,
+      subject,
+      readCount: Number(item.readCount || 0),
+      commentCount: Number(item.commentCount || 0),
+      likeCount: Number(item.likeItCount || 0),
+      boardType: String(item.boardType || "L"),
+      boardName,
+      addedAt: addedAtSafe,
+      queryKeyword: keyword,
+    });
+  }
+
+  return rows;
+}
+
 async function collectArticleCandidates(
   page: Page,
   jobId: string,
@@ -1213,17 +1273,44 @@ async function collectCandidatesForKeyword(
   cafeNumericId: string,
   keyword: string,
   perKeywordTake: number,
-  excludedBoards: Set<string>
+  excludedBoards: Set<string>,
+  fromDate: Date | null,
+  toDate: Date | null
 ): Promise<KeywordCollectResult> {
   const candidates: ArticleCandidate[] = [];
   const seen = new Set<number>();
-  const pagesToFetch = Math.min(6, Math.ceil(Math.max(1, perKeywordTake) / 20));
-  const rows = await fetchCandidatesFromSearchApi(page, cafeNumericId, keyword, 1, pagesToFetch).catch(
-    () => []
-  );
+  const budgetPages = Math.ceil(Math.max(1, Math.min(perKeywordTake, 200)) / 20);
+  const hardCapPages = Math.min(12, Math.max(3, budgetPages));
+  const rows: ArticleCandidate[] = [];
+  let fetched = 0;
+  let stopByDate = false;
+
+  for (let pageNo = 1; pageNo <= hardCapPages; pageNo += 1) {
+    const pageRows = await fetchCandidatesFromSearchApiPage(page, cafeNumericId, keyword, pageNo).catch(() => []);
+    if (pageRows.length === 0) break;
+    fetched += pageRows.length;
+
+    for (const row of pageRows) {
+      if (!row) continue;
+      if (toDate && row.addedAt && row.addedAt > toDate) {
+        continue;
+      }
+      if (fromDate && row.addedAt && row.addedAt < fromDate) {
+        stopByDate = true;
+        continue;
+      }
+      rows.push(row);
+    }
+
+    if (rows.length >= perKeywordTake) break;
+    if (stopByDate) break;
+    if (pageRows.length < 20) break;
+  }
+
   const take = Math.max(1, Math.min(perKeywordTake, rows.length));
   let excludedByBoard = 0;
   let duplicateInKeyword = 0;
+  let duplicateAcrossKeywords = 0;
 
   for (let i = 0; i < take; i += 1) {
     const row = rows[i];
@@ -1249,11 +1336,11 @@ async function collectCandidatesForKeyword(
   return {
     keyword,
     candidates,
-    fetched: rows.length,
+    fetched,
     taken: take,
     excludedByBoard,
     duplicateInKeyword,
-    duplicateAcrossKeywords: 0,
+    duplicateAcrossKeywords,
   };
 }
 
@@ -1884,7 +1971,9 @@ async function run(jobId: string) {
             cafeNumericId,
             keyword,
             Math.max(1, Math.ceil(remainingForCafe / Math.max(1, keywords.length - k))),
-            excludedBoardTokens
+            excludedBoardTokens,
+            job.fromDate || null,
+            job.toDate || null
           );
           console.log(
             `[search] cafe=${cafeName} keyword=${keyword} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dupInKeyword=${collectResult.duplicateInKeyword}`
@@ -1970,6 +2059,10 @@ async function run(jobId: string) {
               jobId,
               {
                 stage: "PARSE",
+                cafeIndex: i + 1,
+                cafeTotal: cafeIds.length,
+                keywordIndex: k + 1,
+                keywordTotal: keywords.length,
                 cafeId,
                 cafeName,
                 url: cand.url,
@@ -1996,14 +2089,18 @@ async function run(jobId: string) {
             ).catch(() => null);
             if (!parsed) {
               keywordSkipped += 1;
-              await setJobProgress(
-                jobId,
-                {
-                  stage: "PARSE",
-                  cafeId,
-                  cafeName,
-                  url: cand.url,
-                  candidates: collectResult.taken,
+            await setJobProgress(
+              jobId,
+              {
+                stage: "PARSE",
+                cafeIndex: i + 1,
+                cafeTotal: cafeIds.length,
+                keywordIndex: k + 1,
+                keywordTotal: keywords.length,
+                cafeId,
+                cafeName,
+                url: cand.url,
+                candidates: collectResult.taken,
                   parseAttempts,
                   collected: collected.length,
                   message: `parse_fail(${keyword})`,
@@ -2062,6 +2159,10 @@ async function run(jobId: string) {
               jobId,
               {
                 stage: "PARSE",
+                cafeIndex: i + 1,
+                cafeTotal: cafeIds.length,
+                keywordIndex: k + 1,
+                keywordTotal: keywords.length,
                 cafeId,
                 cafeName,
                 url: cand.url,
