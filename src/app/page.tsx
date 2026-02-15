@@ -1000,40 +1000,110 @@ export default function DashboardPage() {
     try {
       setCreating(true);
       const { fromDate, toDate } = computeDateRange(datePreset);
-      const res = await fetch("/api/scrape-jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          keywords,
-          directUrls: directUrlsText,
-          excludeKeywords: excludeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
-          excludeBoards: selectedExcludeBoards.map((board) => normalizeExcludeBoardValue(board)).filter(Boolean),
-          fromDate,
-          toDate,
-          minViewCount: minViewCount === "" ? null : Number(minViewCount),
-          minCommentCount: minCommentCount === "" ? null : Number(minCommentCount),
-          useAutoFilter,
-          maxPosts: maxPostsInput.trim() === "" ? null : Number(maxPostsInput),
-          selectedCafes,
-        }),
-      });
+      const basePayload = {
+        keywords,
+        directUrls: directUrlsText,
+        excludeKeywords: excludeKeywordsText
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+        excludeBoards: selectedExcludeBoards
+          .map((board) => normalizeExcludeBoardValue(board))
+          .filter(Boolean),
+        fromDate,
+        toDate,
+        minViewCount: minViewCount === "" ? null : Number(minViewCount),
+        minCommentCount: minCommentCount === "" ? null : Number(minCommentCount),
+        useAutoFilter,
+      } as const;
 
-      try {
-        const data = await res.json();
-        if (!res.ok || !data.success) {
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+      // If the user pasted direct URLs, do NOT split by cafe to avoid duplicating the same URLs across jobs.
+      const shouldSplitByCafe =
+        !directUrlsText.trim() && selectedCafes.length > 1;
+
+      const rawMaxPosts = maxPostsInput.trim();
+      const maxPostsTotal = rawMaxPosts === "" ? null : Number(rawMaxPosts);
+
+      const normalizeTotalMaxPosts = (value: number, cafeCount: number) => {
+        const v = Math.floor(Number(value || 0));
+        const safe = Number.isFinite(v) ? v : 0;
+        // Total is global across all split jobs. Guarantee >= cafeCount so each job can run with >=1 maxPosts.
+        const bumped = Math.max(cafeCount, safe);
+        return Math.min(300, Math.max(1, bumped));
+      };
+
+      const distributeMaxPosts = (total: number, cafeCount: number) => {
+        const base = Math.floor(total / cafeCount);
+        let rem = total - base * cafeCount;
+        return Array.from({ length: cafeCount }).map(() => {
+          const extra = rem > 0 ? 1 : 0;
+          if (rem > 0) rem -= 1;
+          return base + extra;
+        });
+      };
+
+      const postCreate = async (payload: Record<string, unknown>) => {
+        const res = await fetch("/api/scrape-jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(async () => {
+          const raw = await res.text().catch(() => "");
+          throw new Error(raw || "응답을 읽을 수 없습니다.");
+        });
+        if (!res.ok || !data?.success) {
           const detail =
-            typeof data.details === "string" && data.details.trim()
+            typeof data?.details === "string" && data.details.trim()
               ? `\n\n상세: ${data.details}`
               : "";
-          alert((data.error || "작업 생성 실패") + detail);
-          return;
+          throw new Error((data?.error || "작업 생성 실패") + detail);
         }
+        return String((data as { data?: { id?: unknown } } | undefined)?.data?.id || "");
+      };
 
-        await fetchJobs();
-        await startJob(data.data.id);
-      } catch {
-        const raw = await res.text().catch(() => "");
-        alert(`작업 생성 요청 실패(파싱 오류)\n\n${raw || "응답을 읽을 수 없습니다."}`);
+      const createdJobIds: string[] = [];
+
+      if (!shouldSplitByCafe) {
+        const jobId = await postCreate({
+          ...basePayload,
+          maxPosts: maxPostsTotal,
+          selectedCafes,
+        });
+        createdJobIds.push(jobId);
+      } else {
+        const perCafeMaxPosts =
+          maxPostsTotal === null
+            ? Array.from({ length: selectedCafes.length }).map(() => null)
+            : distributeMaxPosts(
+                normalizeTotalMaxPosts(maxPostsTotal, selectedCafes.length),
+                selectedCafes.length
+              );
+
+        for (let i = 0; i < selectedCafes.length; i += 1) {
+          const cafe = selectedCafes[i];
+          const jobId = await postCreate({
+            ...basePayload,
+            maxPosts: perCafeMaxPosts[i],
+            selectedCafes: [cafe],
+          });
+          createdJobIds.push(jobId);
+          // A tiny delay to avoid bursting requests (helps stability).
+          await sleep(150);
+        }
+      }
+
+      await fetchJobs();
+      createdJobIds.forEach((id) => fetchProgress(id));
+
+      if (createdJobIds.length === 1) {
+        alert("작업을 큐에 등록했습니다. Worker가 순서대로 실행합니다.");
+      } else {
+        alert(
+          `카페별로 작업을 분할해 총 ${createdJobIds.length}개 작업을 큐에 등록했습니다.\nWorker가 1개씩 순서대로 실행합니다.`
+        );
       }
     } finally {
       setCreating(false);
