@@ -226,6 +226,47 @@ function resolveDisplayStatus(status: string, progress: JobProgress | null) {
   return key || "QUEUED";
 }
 
+function getJobResultTextByStatus(
+  status: string,
+  job: ScrapeJob,
+  progress: JobProgress | null,
+  fallbackMax?: number
+) {
+  const normalized = normalizeStatus(status);
+  const dbSynced = Number(progress?.dbSynced ?? job.resultCount ?? 0);
+  const sheetSynced = Number(progress?.sheetSynced ?? job.sheetSynced ?? 0);
+  const collected = Number(progress?.collected ?? job.resultCount ?? 0);
+  const target = fallbackMax ?? job.maxPosts;
+  if (normalized === "SUCCESS") {
+    return {
+      label: `완료 (총 ${collected} / 목표 ${target})`,
+      detail: `DB ${dbSynced} / Sheet ${sheetSynced}`,
+    };
+  }
+  if (normalized === "FAILED") {
+    return {
+      label: `실패 (총 ${collected})`,
+      detail: `DB ${dbSynced} / Sheet ${sheetSynced}`,
+    };
+  }
+  if (normalized === "CANCELLED") {
+    return {
+      label: `중단 (총 ${collected})`,
+      detail: `DB ${dbSynced} / Sheet ${sheetSynced}`,
+    };
+  }
+  if (normalized === "RUNNING" && progress) {
+    return {
+      label: `실행 중`,
+      detail: `DB ${dbSynced} / Sheet ${sheetSynced}`,
+    };
+  }
+  return {
+    label: `DB ${dbSynced} / Sheet ${sheetSynced}`,
+    detail: ``,
+  };
+}
+
 function shortenCafeName(value: string) {
   const name = String(value || "");
   if (name.length <= 15) return name;
@@ -1378,9 +1419,9 @@ export default function DashboardPage() {
 
                       const p = progressByJobId[job.id] || null;
                       const displayStatus = resolveDisplayStatus(job.status, p);
-                      const runningResult = displayStatus === "RUNNING" && p
-                        ? `DB ${p?.dbSynced ?? 0} / Sheet ${p?.sheetSynced ?? 0}`
-                        : `DB ${job.resultCount} / Sheet ${job.sheetSynced}`;
+                      const resultText = getJobResultTextByStatus(displayStatus, job, p);
+                      const runningResult = resultText.label;
+                      const runningResultDetail = resultText.detail;
                       const queuedPositionText = (() => {
                       if (displayStatus !== "QUEUED") return null;
                       const queued = jobs
@@ -1397,19 +1438,22 @@ export default function DashboardPage() {
 
                       const progressText = (() => {
                         if (displayStatus === "RUNNING") {
-                        return [
-                          p?.stage ? `단계:${p.stage}` : null,
-                          p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
-                          p?.cafeIndex && p?.cafeTotal ? `(${p.cafeIndex}/${p.cafeTotal})` : null,
-                          p?.keyword ? `키워드:${p.keyword}` : null,
-                          p?.keywordIndex && p?.keywordTotal ? `(${p.keywordIndex}/${p.keywordTotal})` : null,
-                          p?.url ? `URL:${String(p.url).slice(0, 30)}…` : null,
-                          typeof p?.parseAttempts === "number" ? `파싱:${p.parseAttempts}` : null,
-                          typeof p?.collected === "number" ? `수집:${p.collected}` : null,
-                        ]
+                          return [
+                            p?.stage ? `단계:${p.stage}` : null,
+                            p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
+                            p?.cafeIndex && p?.cafeTotal ? `(${p.cafeIndex}/${p.cafeTotal})` : null,
+                            p?.keyword ? `키워드:${p.keyword}` : null,
+                            p?.keywordIndex && p?.keywordTotal ? `(${p.keywordIndex}/${p.keywordTotal})` : null,
+                            p?.url ? `URL:${String(p.url).slice(0, 30)}…` : null,
+                            typeof p?.parseAttempts === "number" ? `파싱:${p.parseAttempts}` : null,
+                            typeof p?.collected === "number" ? `수집:${p.collected}` : null,
+                          ]
                             .filter(Boolean)
-                          .join(" ");
-                      }
+                            .join(" ");
+                        }
+                        if (displayStatus === "SUCCESS") return `완료: ${runningResultDetail || "처리 완료"}`;
+                        if (displayStatus === "FAILED") return `실패: ${runningResultDetail || "처리 실패"}`;
+                        if (displayStatus === "CANCELLED") return `중단: ${runningResultDetail || "사용자 중단"}`;
                         if (displayStatus === "QUEUED") return queuedPositionText || "-";
                         return "-";
                       })();
@@ -1424,7 +1468,12 @@ export default function DashboardPage() {
                         <td className="py-2 max-w-[180px] truncate" title={cafeText}>{cafeText}</td>
                         <td className="py-2">{filterText}{boardFilterText}</td>
                         <td className="py-2 max-w-[260px] truncate" title={progressText}>{progressText}</td>
-                        <td className="py-2">{runningResult}</td>
+                        <td className="py-2">
+                          <div>{runningResult}</div>
+                          {runningResultDetail ? (
+                            <div className="text-xs text-slate-600">{runningResultDetail}</div>
+                          ) : null}
+                        </td>
                           <td className="py-2">
                             <span className={`text-xs px-2 py-1 rounded-full ${getStatusBadgeClass(displayStatus)}`}>
                               {jobStatusText}
