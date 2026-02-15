@@ -300,13 +300,8 @@ function extractCountsFromText(text: string): { viewCount: number; likeCount: nu
   return { viewCount, likeCount, commentCount };
 }
 
-function isAllowedByWords(text: string, includeWords: string[], excludeWords: string[]): boolean {
+function isAllowedByWords(text: string, excludeWords: string[]): boolean {
   const compact = text.replace(/\s+/g, "").toLowerCase();
-
-  if (includeWords.length > 0) {
-    const hit = includeWords.some((word) => compact.includes(word.toLowerCase()));
-    if (!hit) return false;
-  }
 
   if (excludeWords.length > 0) {
     const blocked = excludeWords.some((word) => compact.includes(word.toLowerCase()));
@@ -1691,7 +1686,6 @@ async function run(jobId: string) {
 
   const keywords = parseJsonStringArray(job.keywords);
   const directUrls = parseJsonStringArray(job.directUrls);
-  const includeWords = parseJsonStringArray(job.includeWords);
   const excludeWords = parseJsonStringArray(job.excludeWords);
   const excludeBoards = parseJsonStringArray(job.excludeBoards);
   const cafeIds = parseJsonStringArray(job.cafeIds);
@@ -1784,7 +1778,7 @@ async function run(jobId: string) {
         ).catch(() => null);
         if (!parsed) continue;
         const normalizedForFilter = `${parsed.title}\n${parsed.contentText}`;
-        if (!isAllowedByWords(normalizedForFilter, includeWords, excludeWords)) {
+        if (!isAllowedByWords(normalizedForFilter, excludeWords)) {
           continue;
         }
         // Ensure cafeUrl matches the resolved cafe (for Sheets convenience).
@@ -2055,7 +2049,7 @@ async function run(jobId: string) {
             }
 
             const normalizedForFilter = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
-            if (!isAllowedByWords(normalizedForFilter, includeWords, excludeWords)) {
+            if (!isAllowedByWords(normalizedForFilter, excludeWords)) {
               keywordSkipped += 1;
               keywordFiltered += 1;
               continue;

@@ -238,9 +238,8 @@ export async function POST(request: NextRequest) {
       ? Math.min(300, Math.max(1, Math.floor(maxPostsRaw)))
       : 50;
 
-    const includeKeywords = parseStringList(body?.includeKeywords);
-    const excludeKeywords = parseStringList(body?.excludeKeywords);
-    const excludeBoards = parseStringList(body?.excludeBoards);
+  const excludeKeywords = parseStringList(body?.excludeKeywords);
+  const excludeBoards = parseStringList(body?.excludeBoards);
 
     const fromDate = toDateValue(body?.fromDate);
     const toDate = toDateValue(body?.toDate);
@@ -272,7 +271,6 @@ export async function POST(request: NextRequest) {
       status: "QUEUED" as const,
       keywords: JSON.stringify(keywords),
       directUrls: directUrls.length ? JSON.stringify(directUrls) : null,
-      includeWords: JSON.stringify(includeKeywords),
       excludeWords: JSON.stringify(excludeKeywords),
       fromDate,
       toDate,

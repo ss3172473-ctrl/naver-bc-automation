@@ -397,7 +397,6 @@ export default function DashboardPage() {
 
   const [keywords, setKeywords] = useState("");
   const [directUrlsText, setDirectUrlsText] = useState("");
-  const [includeKeywordsText, setIncludeKeywordsText] = useState("");
   const [excludeKeywordsText, setExcludeKeywordsText] = useState("");
   const [datePreset, setDatePreset] = useState<"1m" | "3m" | "6m" | "1y" | "2y" | "all">("3m");
   const [excludeBoardCandidates, setExcludeBoardCandidates] = useState<string[]>(() => EXCLUDE_BOARD_OPTIONS_DEFAULT);
@@ -890,7 +889,6 @@ export default function DashboardPage() {
         body: JSON.stringify({
           keywords,
           directUrls: directUrlsText,
-          includeKeywords: includeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
           excludeKeywords: excludeKeywordsText.split(",").map((v) => v.trim()).filter(Boolean),
           excludeBoards: selectedExcludeBoards.map((board) => normalizeExcludeBoardValue(board)).filter(Boolean),
           fromDate,
@@ -1265,11 +1263,6 @@ export default function DashboardPage() {
                 placeholder={"예)\nhttps://cafe.naver.com/ArticleRead.nhn?clubid=...&articleid=...\nhttps://cafe.naver.com/ca-fe/cafes/.../articles/..."}
               />
               <div className="mt-1 text-xs text-slate-600">URL 개수: {directUrlCount}개 (입력 시 검색 대신 이 URL만 스크랩)</div>
-            </div>
-
-            <div>
-              <label className="text-sm text-slate-700">포함 단어</label>
-              <input value={includeKeywordsText} onChange={(e) => setIncludeKeywordsText(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" placeholder="정품,직거래" />
             </div>
 
             <div>
