@@ -1049,7 +1049,7 @@ async function collectArticleCandidates(
   // Requirement: for each selected cafe, search each keyword at least once.
   // We cap per-keyword fetches by maxUrls so we can scale up without blowing up runtime.
   // Use multiple pages only when needed to reach requested maxUrls.
-  const perKeywordTake = Math.max(1, Math.floor(maxUrls / Math.max(1, keywords.length)));
+  const perKeywordTake = Math.max(1, Math.ceil(maxUrls / Math.max(1, keywords.length)));
   const pagesToFetch = Math.min(6, Math.ceil(perKeywordTake / 20));
 
   for (let i = 0; i < keywords.length; i += 1) {
