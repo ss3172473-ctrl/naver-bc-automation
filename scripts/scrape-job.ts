@@ -71,6 +71,24 @@ const CANCEL_KEY_PREFIX = "scrapeJobCancel:";
 const SEARCH_API_PAGE_SIZE = 50;
 const SEARCH_API_MIN_PAGES_PER_KEYWORD = 4;
 const SEARCH_API_MAX_PAGES_PER_KEYWORD = 4;
+type SearchByMode = string;
+const SEARCH_BY_MODES_DEFAULT: SearchByMode[] = ["ARTICLE_COMMENT", "2", "1"];
+
+function buildCafeSearchApiUrl(
+  cafeNumericId: string,
+  keyword: string,
+  pageNum: number,
+  searchBy: SearchByMode
+) {
+  return (
+    "https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4" +
+    `?cafeId=${encodeURIComponent(cafeNumericId)}` +
+    `&query=${encodeURIComponent(keyword)}` +
+    `&searchBy=${encodeURIComponent(searchBy)}&sortBy=date` +
+    `&page=${pageNum}&perPage=${SEARCH_API_PAGE_SIZE}` +
+    "&adUnit=MW_CAFE_BOARD&ad=true"
+  );
+}
 
 type StorageStateObject = { cookies: any[]; origins: any[] };
 
@@ -1102,37 +1120,114 @@ async function fetchCandidatesFromSearchApi(
   cafeNumericId: string,
   keyword: string,
   pageNum: number,
-  maxPages = 1
+  maxPages = 1,
+  searchByModes: SearchByMode[] = SEARCH_BY_MODES_DEFAULT
 ): Promise<ArticleCandidate[]> {
   const requestedPages = Math.max(1, Math.min(8, Math.floor(maxPages)));
   const rows: ArticleCandidate[] = [];
+  const seenArticleIds = new Set<number>();
 
   for (let targetPage = pageNum; targetPage < pageNum + requestedPages; targetPage += 1) {
-    const url =
-      `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
-      `?cafeId=${encodeURIComponent(cafeNumericId)}` +
-      `&query=${encodeURIComponent(keyword)}` +
-      `&searchBy=1&sortBy=date&page=${targetPage}&perPage=${SEARCH_API_PAGE_SIZE}` +
-      `&adUnit=MW_CAFE_BOARD&ad=true`;
+    const mergedRows: ArticleCandidate[] = [];
+    let responseCount = 0;
 
+    for (const searchBy of searchByModes) {
+      const url = buildCafeSearchApiUrl(cafeNumericId, keyword, targetPage, searchBy);
+      const resp = await page.request.get(url);
+      if (!resp.ok()) {
+        continue;
+      }
+      responseCount += 1;
+
+      const json = await resp.json();
+      const list = json?.message?.result?.articleList || [];
+      if (!Array.isArray(list) || list.length === 0) continue;
+
+      for (const row of list) {
+        if (row?.type !== "ARTICLE") continue;
+        const item = row.item;
+        if (!item?.articleId) continue;
+
+        const articleId = Number(item.articleId);
+        if (seenArticleIds.has(articleId)) continue;
+        if (mergedRows.some((existing) => existing.articleId === articleId)) continue;
+
+        const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
+        const addedAtSafe = parseNaverCafeDate(item.addDate);
+        const boardName = String(
+          item.boardName ||
+            item.boardTitle ||
+            item.menuName ||
+            item.menu ||
+            item.menuTitle ||
+            item.board ||
+            ""
+        ).trim();
+
+        seenArticleIds.add(articleId);
+        mergedRows.push({
+          articleId,
+          url:
+            `https://cafe.naver.com/ArticleRead.nhn` +
+            `?clubid=${encodeURIComponent(cafeNumericId)}` +
+            `&articleid=${encodeURIComponent(String(item.articleId))}`,
+          subject,
+          readCount: Number(item.readCount || 0),
+          commentCount: Number(item.commentCount || 0),
+          likeCount: Number(item.likeItCount || 0),
+          boardType: String(item.boardType || "L"),
+          boardName,
+          addedAt: addedAtSafe,
+          queryKeyword: keyword,
+        });
+      }
+    }
+
+    if (responseCount === 0 && targetPage === pageNum) {
+      throw new Error(`Search API failed: no available response for keyword=${keyword} page=${targetPage}`);
+    }
+    if (mergedRows.length === 0) break;
+    for (const row of mergedRows) {
+      rows.push(row);
+    }
+  }
+
+  return rows;
+}
+
+async function fetchCandidatesFromSearchApiPage(
+  page: Page,
+  cafeNumericId: string,
+  keyword: string,
+  pageNum: number,
+  searchByModes: SearchByMode[] = SEARCH_BY_MODES_DEFAULT
+): Promise<ArticleCandidate[]> {
+  const rows: ArticleCandidate[] = [];
+  const seenArticleIds = new Set<number>();
+  let responseCount = 0;
+
+  for (const searchBy of searchByModes) {
+    const url = buildCafeSearchApiUrl(cafeNumericId, keyword, pageNum, searchBy);
     const resp = await page.request.get(url);
     if (!resp.ok()) {
-      if (targetPage === pageNum) {
-        throw new Error(`Search API failed: ${resp.status()} ${url}`);
-      }
-      break;
+      continue;
     }
+    responseCount += 1;
 
     const json = await resp.json();
     const list = json?.message?.result?.articleList || [];
-    if (!Array.isArray(list) || list.length === 0) break;
+    if (!Array.isArray(list) || list.length === 0) continue;
 
     for (const row of list) {
       if (row?.type !== "ARTICLE") continue;
       const item = row.item;
       if (!item?.articleId) continue;
 
-      // Search API subjects can contain highlight markup like <em>...</em>.
+      const articleId = Number(item.articleId);
+      if (seenArticleIds.has(articleId)) continue;
+      if (rows.some((existing) => existing.articleId === articleId)) continue;
+      seenArticleIds.add(articleId);
+
       const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
       const addedAtSafe = parseNaverCafeDate(item.addDate);
       const boardName = String(
@@ -1146,9 +1241,8 @@ async function fetchCandidatesFromSearchApi(
       ).trim();
 
       rows.push({
-        articleId: Number(item.articleId),
+        articleId,
         url:
-          // PC article read URL is the most reliable for extracting 본문 text (it uses the cafe_main frame).
           `https://cafe.naver.com/ArticleRead.nhn` +
           `?clubid=${encodeURIComponent(cafeNumericId)}` +
           `&articleid=${encodeURIComponent(String(item.articleId))}`,
@@ -1164,64 +1258,8 @@ async function fetchCandidatesFromSearchApi(
     }
   }
 
-  return rows;
-}
-
-async function fetchCandidatesFromSearchApiPage(
-  page: Page,
-  cafeNumericId: string,
-  keyword: string,
-  pageNum: number
-): Promise<ArticleCandidate[]> {
-  const rows: ArticleCandidate[] = [];
-
-  const url =
-    `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
-    `?cafeId=${encodeURIComponent(cafeNumericId)}` +
-    `&query=${encodeURIComponent(keyword)}` +
-    `&searchBy=1&sortBy=date&page=${pageNum}&perPage=${SEARCH_API_PAGE_SIZE}` +
-    `&adUnit=MW_CAFE_BOARD&ad=true`;
-
-  const resp = await page.request.get(url);
-  if (!resp.ok()) return [];
-
-  const json = await resp.json();
-  const list = json?.message?.result?.articleList || [];
-  if (!Array.isArray(list) || list.length === 0) return [];
-
-  for (const row of list) {
-    if (row?.type !== "ARTICLE") continue;
-    const item = row.item;
-    if (!item?.articleId) continue;
-
-    const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
-    const addedAtSafe = parseNaverCafeDate(item.addDate);
-    const boardName = String(
-      item.boardName ||
-        item.boardTitle ||
-        item.menuName ||
-        item.menu ||
-        item.menuTitle ||
-        item.board ||
-        ""
-    ).trim();
-
-    rows.push({
-      articleId: Number(item.articleId),
-      url:
-        // PC article read URL is the most reliable for extracting 본문 text (it uses the cafe_main frame).
-        `https://cafe.naver.com/ArticleRead.nhn` +
-        `?clubid=${encodeURIComponent(cafeNumericId)}` +
-        `&articleid=${encodeURIComponent(String(item.articleId))}`,
-      subject,
-      readCount: Number(item.readCount || 0),
-      commentCount: Number(item.commentCount || 0),
-      likeCount: Number(item.likeItCount || 0),
-      boardType: String(item.boardType || "L"),
-      boardName,
-      addedAt: addedAtSafe,
-      queryKeyword: keyword,
-    });
+  if (responseCount === 0) {
+    throw new Error(`Search API failed: no available response for keyword=${keyword} page=${pageNum}`);
   }
 
   return rows;
