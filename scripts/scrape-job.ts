@@ -55,6 +55,8 @@ type KeywordCollectResult = {
   candidates: ArticleCandidate[];
   fetched: number;
   pagesScanned: number;
+  pagesTarget: number;
+  perPage: number;
   taken: number;
   excludedByBoard: number;
   duplicateInKeyword: number;
@@ -165,7 +167,12 @@ type KeywordProgressCell = {
   cafeName?: string;
   keyword?: string;
   status?: "queued" | "searching" | "parsing" | "done" | "failed" | "cancelled" | "skipped";
+  // Back-compat: historically stored fetched row count.
   searched?: number;
+  pagesScanned?: number;
+  pagesTarget?: number;
+  perPage?: number;
+  fetchedRows?: number;
   totalResults?: number;
   collected?: number;
   skipped?: number;
@@ -179,6 +186,10 @@ type KeywordProgressPatch = {
   keyword: string;
   status?: "queued" | "searching" | "parsing" | "done" | "failed" | "cancelled" | "skipped";
   searched?: number;
+  pagesScanned?: number;
+  pagesTarget?: number;
+  perPage?: number;
+  fetchedRows?: number;
   totalResults?: number;
   collected?: number;
   skipped?: number;
@@ -1349,6 +1360,8 @@ async function collectArticleCandidates(
 async function collectCandidatesForKeyword(
   page: Page,
   cafeNumericId: string,
+  cafeId: string,
+  cafeName: string,
   keyword: string,
   jobId: string,
   perKeywordTake: number,
@@ -1404,6 +1417,29 @@ async function collectCandidatesForKeyword(
     pagesScanned += 1;
     fetched += pageRows.length;
 
+    // Persist scan progress per (cafe, keyword) so the UI can show "pagesScanned/pagesTarget".
+    // Keep the payload small: only update the matrix cell, not the global stage/message.
+    await setJobProgress(
+      jobId,
+      {},
+      {
+        cafeId,
+        cafeName,
+        keyword,
+        status: "searching",
+        pagesScanned,
+        pagesTarget: hardCapPages,
+        perPage: SEARCH_API_PAGE_SIZE,
+        fetchedRows: fetched,
+        // Back-compat: keep searched as "fetched rows".
+        searched: fetched,
+        totalResults: Math.min(effectiveTake, candidates.length + pageRows.length),
+        collected: 0,
+        skipped: 0,
+        filteredOut: excludedByBoard,
+      }
+    ).catch(() => undefined);
+
     for (const row of pageRows) {
       if (!row) continue;
       if (toDate && row.addedAt && row.addedAt > toDate) {
@@ -1451,6 +1487,8 @@ async function collectCandidatesForKeyword(
     candidates,
     fetched,
     pagesScanned,
+    pagesTarget: hardCapPages,
+    perPage: SEARCH_API_PAGE_SIZE,
     taken: take,
     excludedByBoard,
     duplicateInKeyword,
@@ -2111,6 +2149,8 @@ async function run(jobId: string) {
           const collectResult = await collectCandidatesForKeyword(
             page,
             cafeNumericId,
+            cafeId,
+            cafeName,
             keyword,
             job.id,
             Math.max(1, Math.ceil(remainingForCafe / Math.max(1, keywords.length - k))),
@@ -2133,7 +2173,7 @@ async function run(jobId: string) {
               keywordTotal: keywords.length,
               candidates: collectResult.taken,
               collected: collected.length,
-              message: `searched pages=${collectResult.pagesScanned}/${SEARCH_API_MAX_PAGES_PER_KEYWORD} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dup_kw=${collectResult.duplicateInKeyword}`,
+              message: `searched pages=${collectResult.pagesScanned}/${collectResult.pagesTarget} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dup_kw=${collectResult.duplicateInKeyword}`,
               keywordSearched: collectResult.fetched,
               keywordTotalResults: collectResult.taken,
             },
@@ -2143,6 +2183,10 @@ async function run(jobId: string) {
               keyword,
               status: "searching",
               searched: collectResult.fetched,
+              pagesScanned: collectResult.pagesScanned,
+              pagesTarget: collectResult.pagesTarget,
+              perPage: collectResult.perPage,
+              fetchedRows: collectResult.fetched,
               totalResults: collectResult.taken,
               collected: 0,
               skipped: 0,
@@ -2175,6 +2219,10 @@ async function run(jobId: string) {
                 keyword,
                 status: "done",
                 searched: collectResult.fetched,
+                pagesScanned: collectResult.pagesScanned,
+                pagesTarget: collectResult.pagesTarget,
+                perPage: collectResult.perPage,
+                fetchedRows: collectResult.fetched,
                 totalResults: collectResult.taken,
                 collected: 0,
                 skipped: collectResult.excludedByBoard + collectResult.duplicateInKeyword,
@@ -2251,6 +2299,10 @@ async function run(jobId: string) {
                 keyword,
                 status: "parsing",
                 searched: collectResult.fetched,
+                pagesScanned: collectResult.pagesScanned,
+                pagesTarget: collectResult.pagesTarget,
+                perPage: collectResult.perPage,
+                fetchedRows: collectResult.fetched,
                 totalResults: collectResult.taken,
                 collected: collected.length - keywordStartCollected,
                 skipped: keywordSkipped,
@@ -2289,6 +2341,10 @@ async function run(jobId: string) {
                   keyword,
                   status: "skipped",
                   searched: collectResult.fetched,
+                  pagesScanned: collectResult.pagesScanned,
+                  pagesTarget: collectResult.pagesTarget,
+                  perPage: collectResult.perPage,
+                  fetchedRows: collectResult.fetched,
                   totalResults: collectResult.taken,
                   collected: collected.length - keywordStartCollected,
                   skipped: keywordSkipped,
@@ -2347,6 +2403,10 @@ async function run(jobId: string) {
                 keyword,
                 status: "parsing",
                 searched: collectResult.fetched,
+                pagesScanned: collectResult.pagesScanned,
+                pagesTarget: collectResult.pagesTarget,
+                perPage: collectResult.perPage,
+                fetchedRows: collectResult.fetched,
                 totalResults: collectResult.taken,
                 collected: collected.length - keywordStartCollected,
                 skipped: keywordSkipped,
@@ -2403,6 +2463,10 @@ async function run(jobId: string) {
               keyword,
               status: "done",
               searched: collectResult.fetched,
+              pagesScanned: collectResult.pagesScanned,
+              pagesTarget: collectResult.pagesTarget,
+              perPage: collectResult.perPage,
+              fetchedRows: collectResult.fetched,
               totalResults: collectResult.taken,
               collected: keywordCollected,
               skipped: keywordSkipped + collectResult.duplicateInKeyword,

@@ -41,7 +41,12 @@ type JobProgressCell = {
   cafeName?: string;
   keyword?: string;
   status?: "queued" | "searching" | "parsing" | "done" | "failed" | "cancelled" | "skipped";
+  // Back-compat: historically used as "fetched rows". Prefer pagesScanned/pagesTarget/fetchedRows below.
   searched?: number;
+  pagesScanned?: number;
+  pagesTarget?: number;
+  perPage?: number;
+  fetchedRows?: number;
   totalResults?: number;
   collected?: number;
   skipped?: number;
@@ -1313,9 +1318,23 @@ export default function DashboardPage() {
                                     const cNum = cell ? Number(cell.collected ?? 0) : null;
                                     const sNum = cell ? Number(cell.skipped ?? 0) : null;
                                     const fNum = cell ? Number(cell.filteredOut ?? 0) : null;
+                                    const pagesInfo = cell
+                                      ? (() => {
+                                          const scanned = Number(cell.pagesScanned ?? 0) || 0;
+                                          const target = Number(cell.pagesTarget ?? 0) || 0;
+                                          const fetchedRows =
+                                            typeof cell.fetchedRows === "number"
+                                              ? cell.fetchedRows
+                                              : (typeof cell.searched === "number" ? cell.searched : null);
+                                          if (target > 0) {
+                                            return `페이지 ${scanned}/${target}${fetchedRows !== null ? ` (fetched ${fetchedRows})` : ""}`;
+                                          }
+                                          return fetchedRows !== null ? `fetched ${fetchedRows}` : "";
+                                        })()
+                                      : "";
                                     const tooltip = cell
-                                      ? `수집 ${cNum} / 스킵 ${sNum} / 필터 ${fNum}`
-                                      : `${status} (작업 상태: ${c.status}, 총수집: ${c.collected})`;
+                                      ? [`수집 ${cNum} / 스킵 ${sNum} / 필터 ${fNum}`, pagesInfo].filter(Boolean).join(" / ")
+                                      : `${status} (작업 상태: ${c.status})`;
                                     return (
                                       <td
                                         key={`batch-cell-${c.cafeId}-${kw}`}
@@ -1325,8 +1344,24 @@ export default function DashboardPage() {
                                         <div className="space-y-0.5">
                                           <div>{status}</div>
                                           <div className="text-[11px] text-slate-500">
-                                            {cell ? `수집 ${cNum} / 스킵 ${sNum} / 필터 ${fNum}` : `총수집 ${c.collected}`}
+                                            {cell ? `수집 ${cNum} / 스킵 ${sNum} / 필터 ${fNum}` : "-"}
                                           </div>
+                                          {cell ? (
+                                            <div className="text-[11px] text-slate-400">
+                                              {(() => {
+                                                const scanned = Number(cell.pagesScanned ?? 0) || 0;
+                                                const target = Number(cell.pagesTarget ?? 0) || 0;
+                                                const fetchedRows =
+                                                  typeof cell.fetchedRows === "number"
+                                                    ? cell.fetchedRows
+                                                    : (typeof cell.searched === "number" ? cell.searched : null);
+                                                if (target > 0) {
+                                                  return `페이지 ${scanned}/${target}${fetchedRows !== null ? ` (fetched ${fetchedRows})` : ""}`;
+                                                }
+                                                return fetchedRows !== null ? `fetched ${fetchedRows}` : "";
+                                              })()}
+                                            </div>
+                                          ) : null}
                                         </div>
                                       </td>
                                     );
@@ -1369,9 +1404,8 @@ export default function DashboardPage() {
                       const stepIndex = (effectiveStatus === "RUNNING" && p) ? getPipelineIndex(p?.stage) : 1;
                       const matrixData = buildMatrixRows(job, p);
                           const hasMatrixGrid = !!(matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0);
-                          const matrixText = hasMatrixGrid
-                            ? `총수집 ${matrixData.totalCollected} / 스킵 ${matrixData.totalSkipped} / 필터 ${matrixData.totalFiltered}`
-                            : `수집 추적 중 (${p?.collected ?? 0}/${job.maxPosts})`;
+                          // User request: avoid showing aggregated totals (총수집) in the UI.
+                          const matrixText = hasMatrixGrid ? "" : `수집 추적 중 (${p?.collected ?? 0}/${job.maxPosts})`;
 
                           return (
                             <div key={job.id} className="border border-slate-200 rounded-lg p-3">
@@ -1405,7 +1439,7 @@ export default function DashboardPage() {
                           <p className="text-sm text-black truncate" title={progressText}>
                             {progressText || "-"}
                           </p>
-                          <p className="text-xs text-slate-600 mt-1">{matrixText}</p>
+                          {matrixText ? <p className="text-xs text-slate-600 mt-1">{matrixText}</p> : null}
                           <div className="mt-2 flex gap-2">
                             {PIPELINE_STEPS.map((step, idx) => {
                               const active = idx <= stepIndex;
