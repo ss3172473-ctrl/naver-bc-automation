@@ -485,7 +485,7 @@ export default function DashboardPage() {
   const [storageStateText, setStorageStateText] = useState("");
   const [savingSession, setSavingSession] = useState(false);
   const [isSessionOpen, setIsSessionOpen] = useState(true);
-  const [matrixOrientation, setMatrixOrientation] = useState<MatrixOrientation>("cafe_rows");
+  const [matrixOrientation, setMatrixOrientation] = useState<MatrixOrientation>("keyword_rows");
 
   const [cafes, setCafes] = useState<JoinedCafe[]>([]);
   const [cafesLoading, setCafesLoading] = useState(false);
@@ -1241,9 +1241,10 @@ export default function DashboardPage() {
                                               currentCafeIndex: matrixData.currentCafeIndex,
                                               currentKeywordIndex: matrixData.currentKeywordIndex,
                                             };
-                                            const c = Number(entry?.cell?.collected ?? 0);
-                                            const s = Number(entry?.cell?.skipped ?? 0);
-                                            const f = Number(entry?.cell?.filteredOut ?? 0);
+                                            const hasCell = !!entry?.cell;
+                                            const c = hasCell ? Number(entry?.cell?.collected ?? 0) : null;
+                                            const s = hasCell ? Number(entry?.cell?.skipped ?? 0) : null;
+                                            const f = hasCell ? Number(entry?.cell?.filteredOut ?? 0) : null;
                                             return (
                                               <td
                                                 key={`${job.id}-${keyword}-${cafe.id}`}
@@ -1254,7 +1255,7 @@ export default function DashboardPage() {
                                                 <div className="space-y-0.5">
                                                   <span>{formatCellStatus(entry?.cell ?? null, runningContext)}</span>
                                                   <span className="text-[11px] text-slate-500">
-                                                    수집 {c} / 스킵 {s} / 필터 {f}
+                                                    {hasCell ? `수집 ${c} / 스킵 ${s} / 필터 ${f}` : "-"}
                                                   </span>
                                                 </div>
                                               </td>
@@ -1301,9 +1302,10 @@ export default function DashboardPage() {
                                               currentCafeIndex: matrixData.currentCafeIndex,
                                               currentKeywordIndex: matrixData.currentKeywordIndex,
                                             };
-                                            const c = Number(entry?.cell?.collected ?? 0);
-                                            const s = Number(entry?.cell?.skipped ?? 0);
-                                            const f = Number(entry?.cell?.filteredOut ?? 0);
+                                            const hasCell = !!entry?.cell;
+                                            const c = hasCell ? Number(entry?.cell?.collected ?? 0) : null;
+                                            const s = hasCell ? Number(entry?.cell?.skipped ?? 0) : null;
+                                            const f = hasCell ? Number(entry?.cell?.filteredOut ?? 0) : null;
                                             return (
                                               <td
                                                 key={`${job.id}-cell-${cafe.id}-${keyword}`}
@@ -1314,7 +1316,7 @@ export default function DashboardPage() {
                                                 <div className="space-y-0.5">
                                                   <span>{formatCellStatus(entry?.cell ?? null, runningContext)}</span>
                                                   <span className="text-[11px] text-slate-500">
-                                                    {c}/{s}/{f}
+                                                    {hasCell ? `${c}/${s}/${f}` : "-"}
                                                   </span>
                                                 </div>
                                               </td>

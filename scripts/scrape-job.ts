@@ -54,6 +54,7 @@ type KeywordCollectResult = {
   keyword: string;
   candidates: ArticleCandidate[];
   fetched: number;
+  pagesScanned: number;
   taken: number;
   excludedByBoard: number;
   duplicateInKeyword: number;
@@ -625,6 +626,16 @@ function clampByAutoThreshold(posts: ParsedPost[], useAutoFilter: boolean, minVi
   let appliedMinComment = minComment;
 
   if (useAutoFilter) {
+    // Only auto-pick thresholds when the user provided neither.
+    // If the user sets one (e.g., view>=100) they usually don't expect us to silently add another (e.g., comment>=median).
+    if (minView !== null || minComment !== null) {
+      return posts.filter((p) => {
+        if (appliedMinView !== null && p.viewCount < appliedMinView) return false;
+        if (appliedMinComment !== null && p.commentCount < appliedMinComment) return false;
+        return true;
+      });
+    }
+
     const sortedViews = posts.map((p) => p.viewCount).sort((a, b) => a - b);
     const sortedComments = posts.map((p) => p.commentCount).sort((a, b) => a - b);
 
@@ -1355,6 +1366,7 @@ async function collectCandidatesForKeyword(
     Math.max(SEARCH_API_MIN_PAGES_PER_KEYWORD, budgetPages)
   );
   let fetched = 0;
+  let pagesScanned = 0;
   let stopByDate = false;
   let excludedByBoard = 0;
   let duplicateInKeyword = 0;
@@ -1364,6 +1376,7 @@ async function collectCandidatesForKeyword(
     await assertNotCancelled(jobId, `cancel requested (search page=${pageNo})`);
     const pageRows = await fetchCandidatesFromSearchApiPage(page, cafeNumericId, keyword, pageNo).catch(() => []);
     if (pageRows.length === 0) break;
+    pagesScanned += 1;
     fetched += pageRows.length;
 
     for (const row of pageRows) {
@@ -1411,6 +1424,7 @@ async function collectCandidatesForKeyword(
     keyword,
     candidates,
     fetched,
+    pagesScanned,
     taken: take,
     excludedByBoard,
     duplicateInKeyword,
@@ -2039,6 +2053,11 @@ async function run(jobId: string) {
           const keywordStartCollected = collected.length;
           let keywordSkipped = 0;
           let keywordFiltered = 0;
+          let skippedByDate = 0;
+          let skippedByDuplicate = 0;
+          let filteredByMinView = 0;
+          let filteredByMinComment = 0;
+          let parseFailed = 0;
           const canCollectFromKeyword = remainingForCafe > 0 && collected.length < job.maxPosts;
           await setJobProgress(
             jobId,
@@ -2074,7 +2093,7 @@ async function run(jobId: string) {
             job.toDate || null
           );
           console.log(
-            `[search] cafe=${cafeName} keyword=${keyword} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dupInKeyword=${collectResult.duplicateInKeyword}`
+            `[search] cafe=${cafeName} keyword=${keyword} pages=${collectResult.pagesScanned} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dupInKeyword=${collectResult.duplicateInKeyword}`
           );
           collectResult.duplicateAcrossKeywords = 0;
 
@@ -2125,6 +2144,7 @@ async function run(jobId: string) {
 
             if (seenArticleIds.has(cand.articleId)) {
               keywordSkipped += 1;
+              skippedByDuplicate += 1;
               collectResult.duplicateAcrossKeywords += 1;
               continue;
             }
@@ -2133,10 +2153,12 @@ async function run(jobId: string) {
             // Fast date filter from search API (more reliable than DOM parsing).
             if (job.fromDate && cand.addedAt && cand.addedAt < job.fromDate) {
               keywordSkipped += 1;
+              skippedByDate += 1;
               continue;
             }
             if (job.toDate && cand.addedAt && cand.addedAt > job.toDate) {
               keywordSkipped += 1;
+              skippedByDate += 1;
               continue;
             }
 
@@ -2144,11 +2166,13 @@ async function run(jobId: string) {
             if (job.minViewCount !== null && cand.readCount < job.minViewCount) {
               keywordSkipped += 1;
               keywordFiltered += 1;
+              filteredByMinView += 1;
               continue;
             }
             if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) {
               keywordSkipped += 1;
               keywordFiltered += 1;
+              filteredByMinComment += 1;
               continue;
             }
 
@@ -2187,6 +2211,7 @@ async function run(jobId: string) {
             ).catch(() => null);
             if (!parsed) {
               keywordSkipped += 1;
+              parseFailed += 1;
             await setJobProgress(
               jobId,
               {
@@ -2221,16 +2246,9 @@ async function run(jobId: string) {
               continue;
             }
 
-            // Keyword relevance check (defensive).
-            const normalizedForKeywordCheck = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
-            if (!includesKeyword(normalizedForKeywordCheck, cand.queryKeyword)) {
-              console.log(
-                `[filter] drop keyword_miss kw=${cand.queryKeyword} url=${cand.url} title=${(parsed.title || "").slice(0, 60)}`
-              );
-              keywordSkipped += 1;
-              keywordFiltered += 1;
-              continue;
-            }
+            // NOTE: Do not re-check keyword containment here.
+            // We already queried the Cafe search API by keyword (including comment search modes).
+            // Re-checking can incorrectly drop valid results when comment/body extraction is imperfect.
 
             // Use counts from the search API list (more reliable than page text parsing).
             // Prefer page-extracted counts if present (it reflects current values).
@@ -2319,12 +2337,12 @@ async function run(jobId: string) {
               collected: collected.length,
               parseAttempts,
               message:
-                `keyword_done(${keyword}) fetch=${collectResult.fetched} take=${collectResult.taken} dup_kw=${collectResult.duplicateInKeyword} dup_total=${collectResult.duplicateAcrossKeywords} skip=${keywordSkipped} filter=${keywordFiltered} save=${keywordCollected}`,
+                `keyword_done(${keyword}) pages=${collectResult.pagesScanned} fetched=${collectResult.fetched} cand=${collectResult.taken} ex_board=${collectResult.excludedByBoard} dup_kw=${collectResult.duplicateInKeyword} dup_total=${collectResult.duplicateAcrossKeywords} skip=${keywordSkipped}(dup=${skippedByDuplicate},date=${skippedByDate},parseFail=${parseFailed}) filter=${keywordFiltered}(view=${filteredByMinView},comment=${filteredByMinComment}) save=${keywordCollected}`,
               keywordSearched: collectResult.fetched,
               keywordTotalResults: collectResult.taken,
               keywordCollected,
-              keywordSkipped,
-              keywordFilteredOut: keywordFiltered,
+              keywordSkipped: keywordSkipped + collectResult.duplicateInKeyword,
+              keywordFilteredOut: keywordFiltered + collectResult.excludedByBoard,
             },
             {
               cafeId,
@@ -2334,8 +2352,8 @@ async function run(jobId: string) {
               searched: collectResult.fetched,
               totalResults: collectResult.taken,
               collected: keywordCollected,
-              skipped: keywordSkipped,
-              filteredOut: keywordFiltered,
+              skipped: keywordSkipped + collectResult.duplicateInKeyword,
+              filteredOut: keywordFiltered + collectResult.excludedByBoard,
             }
           ).catch(() => undefined);
           console.log(
