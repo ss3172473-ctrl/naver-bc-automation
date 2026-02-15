@@ -204,6 +204,12 @@ function formatCellStatus(cell: JobProgressCell | null) {
   return "진행중";
 }
 
+function shortenCafeName(value: string) {
+  const name = String(value || "");
+  if (name.length <= 15) return name;
+  return `${name.slice(0, 15)}...`;
+}
+
 function getStoredSessionPanelOpen() {
   if (typeof window === "undefined") return null;
   try {
@@ -970,27 +976,31 @@ export default function DashboardPage() {
                               <table className="w-full text-xs">
                                 <thead>
                                   <tr className="text-left border-b border-slate-200">
-                                    <th className="pr-2 py-1">카페 / 키워드</th>
-                                    {matrixData.keywords.map((keyword) => (
-                                      <th key={`${job.id}-${keyword}`} className="pr-2 py-1 whitespace-nowrap">
-                                        {keyword}
+                                    <th className="pr-2 py-1">키워드 / 카페</th>
+                                    {matrixData.cafes.map((cafe) => (
+                                      <th
+                                        key={`${job.id}-${cafe.id}`}
+                                        className="pr-2 py-1 whitespace-nowrap"
+                                        title={cafe.name}
+                                      >
+                                        {shortenCafeName(cafe.name)}
                                       </th>
                                     ))}
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {matrixData.matrix.map((row, rowIndex) => {
-                                    const cafe = matrixData.cafes[rowIndex];
+                                  {matrixData.keywords.map((keyword, keywordIndex) => {
                                     return (
-                                      <tr key={`${job.id}-${cafe.id}`} className="border-b border-slate-100">
-                                        <td className="font-semibold pr-2 py-1">{cafe.name}</td>
-                                        {row.map((entry, colIndex) => {
+                                      <tr key={`${job.id}-${keyword}`} className="border-b border-slate-100">
+                                        <td className="font-semibold pr-2 py-1">{keyword}</td>
+                                        {matrixData.cafes.map((cafe, cafeIndex) => {
+                                          const entry = matrixData.matrix[cafeIndex]?.[keywordIndex] || null;
                                           const isActive =
                                             matrixData.currentCellActive?.cafeId === cafe.id &&
-                                            matrixData.currentCellActive.keyword === matrixData.keywords[colIndex];
+                                            matrixData.currentCellActive.keyword === keyword;
                                           return (
                                             <td
-                                              key={`${job.id}-${cafe.id}-${matrixData.keywords[colIndex]}`}
+                                              key={`${job.id}-${keyword}-${cafe.id}`}
                                               className={`px-2 py-1 whitespace-nowrap ${
                                                 isActive ? "bg-blue-50 rounded" : ""
                                               }`}
