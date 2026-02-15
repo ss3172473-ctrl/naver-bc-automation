@@ -2122,6 +2122,33 @@ async function run(jobId: string) {
             `[search] cafe=${cafeName} keyword=${keyword} pages=${collectResult.pagesScanned} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dupInKeyword=${collectResult.duplicateInKeyword}`
           );
           collectResult.duplicateAcrossKeywords = 0;
+          await setJobProgress(
+            jobId,
+            {
+              stage: "SEARCH",
+              cafeId,
+              cafeName,
+              keyword,
+              keywordIndex: k + 1,
+              keywordTotal: keywords.length,
+              candidates: collectResult.taken,
+              collected: collected.length,
+              message: `searched pages=${collectResult.pagesScanned}/${SEARCH_API_MAX_PAGES_PER_KEYWORD} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dup_kw=${collectResult.duplicateInKeyword}`,
+              keywordSearched: collectResult.fetched,
+              keywordTotalResults: collectResult.taken,
+            },
+            {
+              cafeId,
+              cafeName,
+              keyword,
+              status: "searching",
+              searched: collectResult.fetched,
+              totalResults: collectResult.taken,
+              collected: 0,
+              skipped: 0,
+              filteredOut: collectResult.excludedByBoard,
+            }
+          ).catch(() => undefined);
 
           if (!canCollectFromKeyword) {
             await setJobProgress(
