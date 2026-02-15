@@ -29,6 +29,25 @@ type ScrapeJob = {
   createdAt: string;
 };
 
+type JobProgress = {
+  updatedAt?: string;
+  stage?: string;
+  message?: string;
+  cafeName?: string;
+  cafeId?: string;
+  cafeIndex?: number;
+  cafeTotal?: number;
+  keyword?: string;
+  keywordIndex?: number;
+  keywordTotal?: number;
+  url?: string;
+  urlIndex?: number;
+  urlTotal?: number;
+  candidates?: number;
+  parseAttempts?: number;
+  collected?: number;
+};
+
 function parseJsonList(input: string | null): string[] {
   if (!input) return [];
   try {
@@ -63,6 +82,8 @@ export default function DashboardPage() {
   const [maxPosts, setMaxPosts] = useState(80);
   const [creating, setCreating] = useState(false);
   const [startingJobId, setStartingJobId] = useState<string | null>(null);
+  const [progressByJobId, setProgressByJobId] = useState<Record<string, JobProgress | null>>({});
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
 
   const keywordCount = useMemo(() => {
     const list = keywords
@@ -178,10 +199,69 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const fetchProgress = useCallback(async (jobId: string) => {
+    const res = await fetch(`/api/scrape-jobs/${jobId}/progress`);
+    const data = await res.json();
+    if (!res.ok || !data.success) return;
+    const progress = data?.data?.progress || null;
+    setProgressByJobId((prev) => ({ ...prev, [jobId]: progress }));
+  }, []);
+
+  const cancelJob = async (jobId: string) => {
+    try {
+      setCancellingJobId(jobId);
+      const res = await fetch(`/api/scrape-jobs/${jobId}/cancel`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        alert(data.error || "중단 요청 실패");
+        return;
+      }
+      alert("중단 요청을 등록했습니다. Worker가 안전하게 종료합니다.");
+    } finally {
+      setCancellingJobId(null);
+    }
+  };
+
   useEffect(() => {
     fetchSession();
     fetchJobs();
   }, [fetchSession, fetchJobs]);
+
+  // Keep the table current: QUEUED -> RUNNING transitions are done by the Worker,
+  // so without polling users will keep seeing QUEUED until manual refresh.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      if (!alive) return;
+      await fetchJobs();
+    };
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [fetchJobs]);
+
+  useEffect(() => {
+    const running = jobs.filter((j) => j.status === "RUNNING");
+    if (running.length === 0) return;
+
+    let alive = true;
+    const tick = async () => {
+      for (const j of running) {
+        if (!alive) return;
+        await fetchProgress(j.id);
+      }
+    };
+
+    tick();
+    const t = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [jobs, fetchProgress]);
 
   const fetchCafes = async () => {
     try {
@@ -304,12 +384,12 @@ export default function DashboardPage() {
               Worker가 네이버에 로그인된 상태로 접속하려면 Playwright storageState(JSON)가 필요합니다.
               1회 생성 후 아래에 붙여넣고 저장하세요.
             </p>
-            <textarea
-              value={storageStateText}
-              onChange={(e) => setStorageStateText(e.target.value)}
-              placeholder='여기에 storageState JSON 전체를 붙여넣기 (예: {"cookies":[...],"origins":[...]})'
-              className="w-full h-40 p-3 border border-slate-200 rounded-lg text-xs font-mono"
-            />
+              <textarea
+                value={storageStateText}
+                onChange={(e) => setStorageStateText(e.target.value)}
+                placeholder='여기에 storageState JSON 전체를 붙여넣기 (예: {"cookies":[...],"origins":[...]})'
+                className="w-full h-40 p-3 border border-slate-200 rounded-lg text-xs font-mono text-black"
+              />
             <div className="flex items-center gap-2">
               <button
                 onClick={saveSession}
@@ -364,7 +444,7 @@ export default function DashboardPage() {
               <textarea
                 value={keywords}
                 onChange={(e) => setKeywords(e.target.value)}
-                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg min-h-[88px]"
+                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg min-h-[88px] text-black"
                 placeholder="공구,미개봉,한정판"
               />
               <div className="mt-1 text-xs text-slate-600">키워드 개수: {keywordCount}개</div>
@@ -375,7 +455,7 @@ export default function DashboardPage() {
               <textarea
                 value={directUrlsText}
                 onChange={(e) => setDirectUrlsText(e.target.value)}
-                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg min-h-[88px] font-mono text-xs"
+                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg min-h-[88px] font-mono text-xs text-black"
                 placeholder={"예)\nhttps://cafe.naver.com/ArticleRead.nhn?clubid=...&articleid=...\nhttps://cafe.naver.com/ca-fe/cafes/.../articles/..."}
               />
               <div className="mt-1 text-xs text-slate-600">URL 개수: {directUrlCount}개 (입력 시 검색 대신 이 URL만 스크랩)</div>
@@ -383,22 +463,22 @@ export default function DashboardPage() {
 
             <div>
               <label className="text-sm text-slate-700">포함 단어</label>
-              <input value={includeKeywordsText} onChange={(e) => setIncludeKeywordsText(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="정품,직거래" />
+              <input value={includeKeywordsText} onChange={(e) => setIncludeKeywordsText(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" placeholder="정품,직거래" />
             </div>
 
             <div>
               <label className="text-sm text-slate-700">제외 단어</label>
-              <input value={excludeKeywordsText} onChange={(e) => setExcludeKeywordsText(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" placeholder="판매완료,홍보" />
+              <input value={excludeKeywordsText} onChange={(e) => setExcludeKeywordsText(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" placeholder="판매완료,홍보" />
             </div>
 
             <div>
               <label className="text-sm text-slate-700">최소 조회수</label>
-              <input type="number" min={0} value={minViewCount} onChange={(e) => setMinViewCount(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+              <input type="number" min={0} value={minViewCount} onChange={(e) => setMinViewCount(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" />
             </div>
 
             <div>
               <label className="text-sm text-slate-700">최소 댓글수</label>
-              <input type="number" min={0} value={minCommentCount} onChange={(e) => setMinCommentCount(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+              <input type="number" min={0} value={minCommentCount} onChange={(e) => setMinCommentCount(e.target.value)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" />
             </div>
 
             <div>
@@ -406,7 +486,7 @@ export default function DashboardPage() {
               <select
                 value={datePreset}
                 onChange={(e) => setDatePreset(e.target.value as any)}
-                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg bg-white text-black"
               >
                 <option value="1m">최근 1개월</option>
                 <option value="3m">최근 3개월</option>
@@ -426,7 +506,7 @@ export default function DashboardPage() {
 
             <div>
               <label className="text-sm text-slate-700">최대 수집 글 수</label>
-              <input type="number" min={1} max={300} value={maxPosts} onChange={(e) => setMaxPosts(Number(e.target.value) || 80)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg" />
+              <input type="number" min={1} max={300} value={maxPosts} onChange={(e) => setMaxPosts(Number(e.target.value) || 80)} className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg text-black" />
               <div className="mt-1 text-xs text-slate-600">
                 권장: {recommendedMaxPosts} (절대 상한: 300). 키워드/카페가 많으면 낮게 잡는 게 안정적입니다.
               </div>
@@ -460,6 +540,7 @@ export default function DashboardPage() {
                     <th className="text-left py-2">키워드</th>
                     <th className="text-left py-2">카페</th>
                     <th className="text-left py-2">필터</th>
+                    <th className="text-left py-2">진행</th>
                     <th className="text-left py-2">결과</th>
                     <th className="text-left py-2">상태</th>
                     <th className="text-left py-2">작업</th>
@@ -473,16 +554,67 @@ export default function DashboardPage() {
                       ? "AUTO"
                       : `조회 ${job.minViewCount ?? 0}+ / 댓글 ${job.minCommentCount ?? 0}+`;
 
+                    const p = progressByJobId[job.id] || null;
+                    const queuedPositionText = (() => {
+                      if (job.status !== "QUEUED") return null;
+                      const queued = jobs
+                        .filter((j) => j.status === "QUEUED")
+                        .slice()
+                        .sort(
+                          (a, b) =>
+                            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+                        );
+                      const idx = queued.findIndex((j) => j.id === job.id);
+                      if (idx < 0) return "대기중";
+                      return idx === 0 ? "대기중 (다음 순서)" : `대기중 (앞에 ${idx}개)`;
+                    })();
+
+                    const progressText = (() => {
+                      if (job.status === "RUNNING") {
+                        return [
+                          p?.stage ? `단계:${p.stage}` : null,
+                          p?.cafeName ? `카페:${p.cafeName}` : p?.cafeId ? `카페:${p.cafeId}` : null,
+                          p?.cafeIndex && p?.cafeTotal ? `(${p.cafeIndex}/${p.cafeTotal})` : null,
+                          p?.keyword ? `키워드:${p.keyword}` : null,
+                          p?.keywordIndex && p?.keywordTotal ? `(${p.keywordIndex}/${p.keywordTotal})` : null,
+                          p?.url ? `URL:${String(p.url).slice(0, 30)}…` : null,
+                          typeof p?.parseAttempts === "number" ? `파싱:${p.parseAttempts}` : null,
+                          typeof p?.collected === "number" ? `수집:${p.collected}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" ");
+                      }
+                      if (job.status === "QUEUED") return queuedPositionText || "-";
+                      return "-";
+                    })();
+
                     return (
                       <tr key={job.id} className="border-b border-slate-100">
                         <td className="py-2">{new Date(job.createdAt).toLocaleString("ko-KR")}</td>
                         <td className="py-2 max-w-[180px] truncate" title={keywordText}>{keywordText}</td>
                         <td className="py-2 max-w-[180px] truncate" title={cafeText}>{cafeText}</td>
                         <td className="py-2">{filterText}</td>
+                        <td className="py-2 max-w-[260px] truncate" title={progressText}>{progressText}</td>
                         <td className="py-2">DB {job.resultCount} / Sheet {job.sheetSynced}</td>
                         <td className="py-2">{job.status}</td>
                         <td className="py-2">
-                          {job.status !== "RUNNING" && (
+                          {job.status === "RUNNING" ? (
+                            <button
+                              onClick={() => cancelJob(job.id)}
+                              disabled={cancellingJobId === job.id}
+                              className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
+                            >
+                              {cancellingJobId === job.id ? "중단 요청 중" : "중단"}
+                            </button>
+                          ) : job.status === "QUEUED" ? (
+                            <button
+                              onClick={() => cancelJob(job.id)}
+                              disabled={cancellingJobId === job.id}
+                              className="px-2 py-1 text-xs bg-red-600 text-white rounded disabled:opacity-50"
+                            >
+                              {cancellingJobId === job.id ? "취소 중" : "대기 취소"}
+                            </button>
+                          ) : (
                             <button
                               onClick={() => startJob(job.id)}
                               disabled={startingJobId === job.id}

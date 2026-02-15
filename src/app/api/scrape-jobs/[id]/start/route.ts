@@ -4,6 +4,14 @@ import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
+function progressKey(jobId: string) {
+  return `scrapeJobProgress:${jobId}`;
+}
+
+function cancelKey(jobId: string) {
+  return `scrapeJobCancel:${jobId}`;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -35,6 +43,9 @@ export async function POST(
 
   // Vercel(Serverless)에서는 Playwright 스크랩을 직접 실행하면 시간 제한/중단 문제가 생깁니다.
   // 실제 실행은 별도 Worker가 QUEUED 작업을 가져가 처리합니다.
+  await prisma.setting.deleteMany({
+    where: { key: { in: [progressKey(id), cancelKey(id)] } },
+  });
   await prisma.scrapeJob.update({
     where: { id },
     data: {
