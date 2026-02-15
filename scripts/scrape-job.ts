@@ -1087,6 +1087,13 @@ async function parsePost(
       }
     }
 
+    // Last resort: if we successfully scraped comments but couldn't parse/resolve commentCount,
+    // use the number of extracted comment blocks (each comment item usually contains "답글쓰기").
+    if (!finalCommentCount && commentsText) {
+      const est = (commentsText.match(/답글쓰기/g) || []).length;
+      if (est > 0) finalCommentCount = est;
+    }
+
     // Skip author parsing (unstable selectors; not needed for the user's sheet workflow).
     const authorName = "";
 
@@ -1349,38 +1356,36 @@ async function run(jobId: string) {
     // Dedupe by (url + content). If the same URL was scraped before but content differs
     // (e.g., improved extraction or post updated), allow inserting a new row.
     const existedByHash = await prisma.scrapePost.findUnique({ where: { contentHash: hash } });
-    if (existedByHash) {
-      console.log(`[save] skip (existing hash) ${post.sourceUrl}`);
-      continue;
-    }
     const existedByUrl = await prisma.scrapePost.findFirst({ where: { sourceUrl: post.sourceUrl } });
-    if (existedByUrl && existedByUrl.contentHash === hash) {
-      console.log(`[save] skip (existing url+hash) ${post.sourceUrl}`);
-      continue;
+    const isSameAsExisting = Boolean(existedByHash) || (existedByUrl && existedByUrl.contentHash === hash);
+
+    // Always send to Sheets (so reruns can refresh counts), but avoid inserting exact duplicates into DB.
+    if (isSameAsExisting) {
+      console.log(`[save] skip DB insert (existing) ${post.sourceUrl}`);
+    } else {
+      console.log(`[save] creating post hash=${hash.slice(0, 10)} len=${post.contentText.length}`);
+      await prisma.scrapePost.create({
+        data: {
+          jobId,
+          sourceUrl: post.sourceUrl,
+          cafeId: post.cafeId,
+          cafeName: post.cafeName,
+          cafeUrl: post.cafeUrl,
+          title: post.title,
+          authorName: post.authorName,
+          publishedAt: post.publishedAt,
+          viewCount: post.viewCount,
+          likeCount: post.likeCount,
+          commentCount: post.commentCount,
+          contentText: post.contentText,
+          contentHash: hash,
+          rawHtml: post.rawHtml,
+        },
+      });
+
+      // comments disabled by user request
+      savedCount += 1;
     }
-
-    console.log(`[save] creating post hash=${hash.slice(0, 10)} len=${post.contentText.length}`);
-
-    const created = await prisma.scrapePost.create({
-      data: {
-        jobId,
-        sourceUrl: post.sourceUrl,
-        cafeId: post.cafeId,
-        cafeName: post.cafeName,
-        cafeUrl: post.cafeUrl,
-        title: post.title,
-        authorName: post.authorName,
-        publishedAt: post.publishedAt,
-        viewCount: post.viewCount,
-        likeCount: post.likeCount,
-        commentCount: post.commentCount,
-        contentText: post.contentText,
-        contentHash: hash,
-        rawHtml: post.rawHtml,
-      },
-    });
-
-    // comments disabled by user request
 
     postRows.push({
       jobId,
@@ -1398,8 +1403,6 @@ async function run(jobId: string) {
       commentsText: post.commentsText || "",
       contentText: post.contentText,
     });
-
-    savedCount += 1;
   }
 
   const csvPath = writeCsv(jobId, finalPosts);
