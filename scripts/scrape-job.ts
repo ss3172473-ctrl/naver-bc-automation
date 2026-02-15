@@ -1391,7 +1391,9 @@ async function collectCandidatesForKeyword(
 
     if (candidates.length >= effectiveTake) break;
     if (stopByDate) break;
-    if (pageRows.length < SEARCH_API_PAGE_SIZE) break;
+    // NOTE: We query multiple `searchBy` modes and dedupe/merge results.
+    // The merged row count per page can be < SEARCH_API_PAGE_SIZE even when there are more pages.
+    // Only stop early when the API returns an empty page (handled above), we hit date/budget, or we filled the take.
   }
 
   const take = candidates.length;
