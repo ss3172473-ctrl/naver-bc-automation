@@ -40,6 +40,17 @@ function toJobSelect() {
   return select;
 }
 
+function normalizeMaxPosts(rawMaxPosts: number): number {
+  return Math.min(300, Math.max(1, Math.floor(Number(rawMaxPosts || 0))));
+}
+
+function sanitizeMaxPostsOnJobs<T extends { maxPosts: number }>(jobs: T[]): Array<Omit<T, "maxPosts"> & { maxPosts: number }> {
+  return jobs.map((job) => ({
+    ...job,
+    maxPosts: normalizeMaxPosts(job.maxPosts),
+  }));
+}
+
 function isExcludeBoardsSchemaMismatch(error: unknown): boolean {
   const raw = error instanceof Error ? error.message : String(error);
   const code = (error as { code?: string } | undefined)?.code;
@@ -167,7 +178,7 @@ export async function GET() {
     select: toJobSelect(),
   });
 
-  return NextResponse.json({ success: true, data: jobs });
+  return NextResponse.json({ success: true, data: sanitizeMaxPostsOnJobs(jobs) });
 }
 
 export async function POST(request: NextRequest) {

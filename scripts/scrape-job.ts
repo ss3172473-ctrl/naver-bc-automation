@@ -50,6 +50,16 @@ type ArticleCandidate = {
   queryKeyword: string;
 };
 
+type KeywordCollectResult = {
+  keyword: string;
+  candidates: ArticleCandidate[];
+  fetched: number;
+  taken: number;
+  excludedByBoard: number;
+  duplicateInKeyword: number;
+  duplicateAcrossKeywords: number;
+};
+
 const prisma = new PrismaClient();
 const SESSION_FILE =
   process.env.NAVER_CAFE_SESSION_FILE ||
@@ -116,19 +126,99 @@ type JobProgress = {
   urlIndex?: number;
   urlTotal?: number;
   candidates?: number;
+  keywordSearched?: number;
+  keywordCollected?: number;
+  keywordSkipped?: number;
+  keywordFilteredOut?: number;
+  keywordTotalResults?: number;
   parseAttempts?: number;
   collected?: number;
   sheetSynced?: number;
   dbSynced?: number;
+  keywordMatrix?: Record<string, KeywordProgressCell>;
 };
 
-async function setJobProgress(jobId: string, patch: Partial<JobProgress>) {
+type KeywordProgressCell = {
+  cafeId?: string;
+  cafeName?: string;
+  keyword?: string;
+  status?: "queued" | "searching" | "parsing" | "done" | "failed" | "cancelled" | "skipped";
+  searched?: number;
+  totalResults?: number;
+  collected?: number;
+  skipped?: number;
+  filteredOut?: number;
+  updatedAt?: string;
+};
+
+type KeywordProgressPatch = {
+  cafeId: string;
+  cafeName: string;
+  keyword: string;
+  status?: "queued" | "searching" | "parsing" | "done" | "failed" | "cancelled" | "skipped";
+  searched?: number;
+  totalResults?: number;
+  collected?: number;
+  skipped?: number;
+  filteredOut?: number;
+};
+
+function makeProgressPairKey(cafeId: string, keyword: string): string {
+  const safeCafe = String(cafeId || "").trim().toLowerCase();
+  const safeKeyword = String(keyword || "").trim().toLowerCase();
+  return `${safeCafe}::${safeKeyword}`;
+}
+
+async function setJobProgress(
+  jobId: string,
+  patch: Partial<JobProgress>,
+  pair?: KeywordProgressPatch
+) {
   const key = progressKey(jobId);
-  const next: JobProgress = {
-    updatedAt: new Date().toISOString(),
-    stage: patch.stage || "RUNNING",
-    ...patch,
+  const now = new Date().toISOString();
+  let previous: JobProgress = {
+    updatedAt: now,
+    stage: "RUNNING",
   };
+
+  try {
+    const row = await prisma.setting.findUnique({ where: { key } });
+    if (row?.value) {
+      const parsed = JSON.parse(row.value);
+      if (parsed && typeof parsed === "object") {
+        previous = parsed as JobProgress;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const next: JobProgress = {
+    ...previous,
+    ...patch,
+    stage: patch.stage || previous.stage || "RUNNING",
+    updatedAt: now,
+  };
+
+  const matrix = { ...(next.keywordMatrix || {}) };
+  if (pair?.cafeId && pair.keyword) {
+    const pairKey = makeProgressPairKey(pair.cafeId, pair.keyword);
+    const existingCell = matrix[pairKey] || {};
+    matrix[pairKey] = {
+      ...existingCell,
+      ...pair,
+      cafeId: pair.cafeId || existingCell.cafeId || "",
+      cafeName: pair.cafeName || existingCell.cafeName || pair.cafeId,
+      keyword: pair.keyword || existingCell.keyword || "",
+      updatedAt: now,
+    };
+    next.keywordMatrix = matrix;
+  }
+
+  if (Object.keys(matrix).length === 0) {
+    next.keywordMatrix = undefined;
+  }
+
   await prisma.setting.upsert({
     where: { key },
     create: { key, value: JSON.stringify(next) },
@@ -867,6 +957,19 @@ function getClubIdFromUrl(url: string): string | null {
   return m?.[1] || null;
 }
 
+function extractNumericClubIdFromUrl(url?: string | null): string | null {
+  if (!url) return null;
+  const q = getQueryParam(url, "clubid") || getQueryParam(url, "cafeId");
+  if (q && /^\d+$/.test(q)) return q;
+
+  const pathMatch = String(url).match(/\/(?:ca-fe\/)?cafes\/(\d+)(?:[/?#]|$)/i);
+  if (pathMatch?.[1]) return pathMatch[1];
+
+  const directMatch = String(url).match(/(?:^|[?&])(clubid|cafeId)=([0-9]+)/i);
+  if (directMatch?.[2] && /^\d+$/.test(directMatch[2])) return directMatch[2];
+  return null;
+}
+
 function buildFeArticleUrl(clubid: string, articleid: string): string {
   return (
     `https://cafe.naver.com/ca-fe/cafes/${encodeURIComponent(clubid)}` +
@@ -902,6 +1005,19 @@ async function buildClubIdToCafeMetaMap(
     });
   }
   return map;
+}
+
+async function resolveCafeNumericId(
+  page: Page,
+  cafeId: string,
+  memberUrl?: string | null
+): Promise<string> {
+  if (/^\d+$/.test(String(cafeId || ""))) return String(cafeId);
+
+  const hinted = extractNumericClubIdFromUrl(memberUrl);
+  if (hinted) return hinted;
+
+  return getClubId(page, cafeId);
 }
 
 async function getClubId(page: Page, cafeId: string): Promise<string> {
@@ -1103,7 +1219,7 @@ async function collectCandidatesForKeyword(
   keyword: string,
   perKeywordTake: number,
   excludedBoards: Set<string>
-): Promise<ArticleCandidate[]> {
+): Promise<KeywordCollectResult> {
   const candidates: ArticleCandidate[] = [];
   const seen = new Set<number>();
   const pagesToFetch = Math.min(6, Math.ceil(Math.max(1, perKeywordTake) / 20));
@@ -1111,14 +1227,20 @@ async function collectCandidatesForKeyword(
     () => []
   );
   const take = Math.max(1, Math.min(perKeywordTake, rows.length));
+  let excludedByBoard = 0;
+  let duplicateInKeyword = 0;
 
   for (let i = 0; i < take; i += 1) {
     const row = rows[i];
     if (!row) continue;
     if (isExcludedBoard(row, excludedBoards)) {
+      excludedByBoard += 1;
       continue;
     }
-    if (seen.has(row.articleId)) continue;
+    if (seen.has(row.articleId)) {
+      duplicateInKeyword += 1;
+      continue;
+    }
     seen.add(row.articleId);
     candidates.push(row);
   }
@@ -1129,7 +1251,15 @@ async function collectCandidatesForKeyword(
     return bt - at;
   });
 
-  return candidates;
+  return {
+    keyword,
+    candidates,
+    fetched: rows.length,
+    taken: take,
+    excludedByBoard,
+    duplicateInKeyword,
+    duplicateAcrossKeywords: 0,
+  };
 }
 
 async function parsePost(
@@ -1441,6 +1571,25 @@ type ScrapeJobForRun = {
   errorMessage: string | null;
 };
 
+function normalizeMaxPosts(rawMaxPosts: unknown): number {
+  const num = Number(rawMaxPosts);
+  if (!Number.isFinite(num)) return 50;
+  return Math.min(300, Math.max(1, Math.floor(num)));
+}
+
+async function normalizeAndPersistJobMaxPosts(
+  jobId: string,
+  rawMaxPosts: number
+): Promise<number> {
+  const normalizedMaxPosts = normalizeMaxPosts(rawMaxPosts);
+  if (normalizedMaxPosts !== rawMaxPosts) {
+    await prisma.scrapeJob
+      .update({ where: { id: jobId }, data: { maxPosts: normalizedMaxPosts } })
+      .catch(() => undefined);
+  }
+  return normalizedMaxPosts;
+}
+
 async function loadJob(jobId: string): Promise<ScrapeJobForRun> {
   try {
     const jobWithExcludeBoards = await prisma.scrapeJob.findUnique({
@@ -1469,8 +1618,14 @@ async function loadJob(jobId: string): Promise<ScrapeJobForRun> {
     if (!jobWithExcludeBoards) {
       throw new Error("작업을 찾을 수 없습니다.");
     }
-
-    return jobWithExcludeBoards as ScrapeJobForRun;
+    const normalizedMaxPosts = await normalizeAndPersistJobMaxPosts(
+      jobId,
+      jobWithExcludeBoards.maxPosts
+    );
+    return {
+      ...(jobWithExcludeBoards as ScrapeJobForRun),
+      maxPosts: normalizedMaxPosts,
+    };
   } catch (error: any) {
     // Backward compatibility: old DB without excludeBoards column.
     const code = error?.code;
@@ -1503,9 +1658,13 @@ async function loadJob(jobId: string): Promise<ScrapeJobForRun> {
     if (!jobWithoutExcludeBoards) {
       throw new Error("작업을 찾을 수 없습니다.");
     }
-
+    const normalizedMaxPosts = await normalizeAndPersistJobMaxPosts(
+      jobId,
+      jobWithoutExcludeBoards.maxPosts
+    );
     return {
       ...(jobWithoutExcludeBoards as Omit<ScrapeJobForRun, "excludeBoards">),
+      maxPosts: normalizedMaxPosts,
       excludeBoards: null,
     };
   }
@@ -1515,6 +1674,13 @@ async function run(jobId: string) {
   const job = await loadJob(jobId);
   if (!job) throw new Error("작업이 존재하지 않습니다.");
   const storageState = await loadStorageState();
+  console.log(
+    `[run] start jobId=${jobId} keyCount=${parseJsonStringArray(job.keywords).length} direct=${Boolean(
+      job.directUrls
+    )} maxPosts=${normalizeMaxPosts(job.maxPosts)} autoFilter=${job.useAutoFilter} fromDate=${
+      job.fromDate?.toISOString() || "-"
+    } toDate=${job.toDate?.toISOString() || "-"}`
+  );
 
   await clearCancelAndProgress(jobId).catch(() => undefined);
 
@@ -1549,6 +1715,14 @@ async function run(jobId: string) {
   const collected: ParsedPost[] = [];
   const sheetPending: SheetPostPayload[] = [];
   const sheetState = { synced: 0, saved: 0 };
+  const membershipRows = await prisma.cafeMembership.findMany({
+    where: { cafeId: { in: cafeIds } },
+    select: { cafeId: true, name: true, url: true },
+  });
+  const memberMap = new Map<string, string>();
+  for (const row of membershipRows) {
+    memberMap.set(String(row.cafeId), String(row.url || ""));
+  }
 
   const flushSheetRows = async (force = false) => {
     const shouldFlush = force ? sheetPending.length > 0 : sheetPending.length >= 1;
@@ -1627,7 +1801,6 @@ async function run(jobId: string) {
         const cafeId = cafeIds[i];
         const cafeName = cafeNames[i] || cafeId;
 
-        const alreadyEnough = collected.length >= job.maxPosts;
         await setJobProgress(jobId, {
           stage: "SEARCH",
           cafeId,
@@ -1638,83 +1811,226 @@ async function run(jobId: string) {
           collected: collected.length,
         }).catch(() => undefined);
 
-        const cafeNumericId = await getClubId(page, cafeId);
+        let cafeNumericId = "";
+        try {
+          const memberUrl = memberMap.get(cafeId);
+          if (!memberUrl && !/^\d+$/.test(cafeId)) {
+            console.warn(`[run] cafe membership not found: ${cafeId}`);
+          }
+          cafeNumericId = await resolveCafeNumericId(page, cafeId, memberUrl);
+          console.log(`[run] cafe resolved id=${cafeId} -> ${cafeNumericId}`);
+        } catch (error) {
+          console.error(`[run] getClubId 실패: cafeId=${cafeId}`, error);
+          await setJobProgress(
+            jobId,
+            {
+              stage: "SEARCH",
+              cafeId,
+              cafeName,
+              cafeIndex: i + 1,
+              cafeTotal: cafeIds.length,
+              collected: collected.length,
+              message: `카페 이동 실패: ${cafeId}`,
+              keywordSkipped: 1,
+              keywordFilteredOut: 1,
+            },
+            {
+              cafeId,
+              cafeName,
+              keyword: "",
+              status: "failed",
+            }
+          ).catch(() => undefined);
+          continue;
+        }
         const seenArticleIds = new Set<number>();
+        let cafeKeywordCollected = 0;
+        let cafeKeywordSkipped = 0;
+        let cafeKeywordFiltered = 0;
 
-        // Candidate cap per cafe (keep stable even with many keywords).
-        const perCafeMaxUrls = alreadyEnough ? 1 : Math.min(120, Math.max(30, Math.ceil(job.maxPosts * 6)));
-        const perKeywordTake = Math.max(1, Math.ceil(perCafeMaxUrls / Math.max(1, keywords.length)));
+        const remainingCafes = Math.max(1, cafeIds.length - i);
+        const remainingGlobal = Math.max(0, job.maxPosts - collected.length);
+        const perCafeBudget = Math.max(1, Math.ceil(remainingGlobal / remainingCafes));
+        let remainingForCafe = Math.min(remainingGlobal, perCafeBudget);
 
         let parseAttempts = 0;
-        const parseBudget = Math.max(20, job.maxPosts * 8);
+        const parseBudget = Math.max(20, job.maxPosts * 2);
 
         for (let k = 0; k < keywords.length; k += 1) {
           const keyword = keywords[k] || "";
-          await setJobProgress(jobId, {
-            stage: "SEARCH",
-            cafeId,
-            cafeName,
-            keyword,
-            keywordIndex: k + 1,
-            keywordTotal: keywords.length,
-            candidates: seenArticleIds.size,
-            collected: collected.length,
-            message: "searching",
-          }).catch(() => undefined);
+          const keywordStartCollected = collected.length;
+          let keywordSkipped = 0;
+          let keywordFiltered = 0;
+          const canCollectFromKeyword = remainingForCafe > 0 && collected.length < job.maxPosts;
+          await setJobProgress(
+            jobId,
+            {
+              stage: "SEARCH",
+              cafeId,
+              cafeName,
+              keyword,
+              keywordIndex: k + 1,
+              keywordTotal: keywords.length,
+              candidates: seenArticleIds.size,
+              collected: collected.length,
+              message: "searching",
+            },
+            {
+              cafeId,
+              cafeName,
+              keyword,
+              status: "searching",
+              searched: 0,
+              totalResults: 0,
+            }
+          ).catch(() => undefined);
 
-          const candidates = await collectCandidatesForKeyword(
+          const collectResult = await collectCandidatesForKeyword(
             page,
             cafeNumericId,
             keyword,
-            perKeywordTake,
+            Math.max(1, Math.ceil(remainingForCafe / Math.max(1, keywords.length - k))),
             excludedBoardTokens
           );
+          console.log(
+            `[search] cafe=${cafeName} keyword=${keyword} fetched=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dupInKeyword=${collectResult.duplicateInKeyword}`
+          );
+          collectResult.duplicateAcrossKeywords = 0;
 
-          // Requirement: search each keyword once per selected cafe.
-          // If maxPosts already reached, keep search execution and skip parsing.
-          if (alreadyEnough) {
-            console.log(`[run] maxPosts reached; skipping parse for cafe=${cafeId} keyword=${keyword}`);
+          if (!canCollectFromKeyword) {
+            await setJobProgress(
+              jobId,
+              {
+                stage: "SEARCH",
+                cafeId,
+                cafeName,
+                keyword,
+                keywordIndex: k + 1,
+                keywordTotal: keywords.length,
+                candidates: collectResult.taken,
+                collected: collected.length,
+                message: `keyword_done(${keyword}) fetch=${collectResult.fetched} take=${collectResult.taken} excluded=${collectResult.excludedByBoard} dup_kw=${collectResult.duplicateInKeyword} dup_total=${collectResult.duplicateAcrossKeywords} skip=0 filter=0 save=0`,
+                keywordSearched: collectResult.fetched,
+                keywordTotalResults: collectResult.taken,
+                keywordCollected: 0,
+                keywordSkipped: collectResult.excludedByBoard + collectResult.duplicateInKeyword,
+                keywordFilteredOut: collectResult.excludedByBoard,
+              },
+              {
+                cafeId,
+                cafeName,
+                keyword,
+                status: "done",
+                searched: collectResult.fetched,
+                totalResults: collectResult.taken,
+                collected: 0,
+                skipped: collectResult.excludedByBoard + collectResult.duplicateInKeyword,
+                filteredOut: collectResult.excludedByBoard,
+              }
+            ).catch(() => undefined);
             continue;
           }
 
-          for (const cand of candidates) {
+          for (const cand of collectResult.candidates) {
+            if (remainingForCafe <= 0 || collected.length >= job.maxPosts) break;
             if (await isCancelRequested(jobId)) {
               await setJobProgress(jobId, { stage: "CANCELLED", message: "cancel requested" }).catch(() => undefined);
               throw new Error("cancelled");
             }
-            if (collected.length >= job.maxPosts) break;
             if (parseAttempts >= parseBudget) {
               console.log(`[run] parseBudget reached cafe=${cafeId} budget=${parseBudget}`);
               break;
             }
 
-            if (seenArticleIds.has(cand.articleId)) continue;
+            if (seenArticleIds.has(cand.articleId)) {
+              keywordSkipped += 1;
+              collectResult.duplicateAcrossKeywords += 1;
+              continue;
+            }
             seenArticleIds.add(cand.articleId);
 
             // Fast date filter from search API (more reliable than DOM parsing).
-            if (job.fromDate && cand.addedAt && cand.addedAt < job.fromDate) continue;
-            if (job.toDate && cand.addedAt && cand.addedAt > job.toDate) continue;
+            if (job.fromDate && cand.addedAt && cand.addedAt < job.fromDate) {
+              keywordSkipped += 1;
+              continue;
+            }
+            if (job.toDate && cand.addedAt && cand.addedAt > job.toDate) {
+              keywordSkipped += 1;
+              continue;
+            }
 
             // Early filter by counts from list API (fast).
-            if (job.minViewCount !== null && cand.readCount < job.minViewCount) continue;
-            if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) continue;
+            if (job.minViewCount !== null && cand.readCount < job.minViewCount) {
+              keywordSkipped += 1;
+              keywordFiltered += 1;
+              continue;
+            }
+            if (job.minCommentCount !== null && cand.commentCount < job.minCommentCount) {
+              keywordSkipped += 1;
+              keywordFiltered += 1;
+              continue;
+            }
 
             parseAttempts += 1;
-            await setJobProgress(jobId, {
-              stage: "PARSE",
-              cafeId,
-              cafeName,
-              url: cand.url,
-              candidates: candidates.length,
-              parseAttempts,
-              collected: collected.length,
-            }).catch(() => undefined);
+            await setJobProgress(
+              jobId,
+              {
+                stage: "PARSE",
+                cafeId,
+                cafeName,
+                url: cand.url,
+                candidates: collectResult.taken,
+                parseAttempts,
+                collected: collected.length,
+              },
+              {
+                cafeId,
+                cafeName,
+                keyword,
+                status: "parsing",
+                searched: collectResult.fetched,
+                totalResults: collectResult.taken,
+                collected: collected.length - keywordStartCollected,
+                skipped: keywordSkipped,
+                filteredOut: keywordFiltered,
+              }
+            ).catch(() => undefined);
             const parsed = await withTimeout(
               parsePost(page, cand.url, cafeId, cafeNumericId, cafeName, cand.subject),
               90000,
               "parsePost overall"
             ).catch(() => null);
-            if (!parsed) continue;
+            if (!parsed) {
+              keywordSkipped += 1;
+              await setJobProgress(
+                jobId,
+                {
+                  stage: "PARSE",
+                  cafeId,
+                  cafeName,
+                  url: cand.url,
+                  candidates: collectResult.taken,
+                  parseAttempts,
+                  collected: collected.length,
+                  message: `parse_fail(${keyword})`,
+                  keywordSkipped,
+                  keywordFilteredOut: keywordFiltered,
+                },
+                {
+                  cafeId,
+                  cafeName,
+                  keyword,
+                  status: "skipped",
+                  searched: collectResult.fetched,
+                  totalResults: collectResult.taken,
+                  collected: collected.length - keywordStartCollected,
+                  skipped: keywordSkipped,
+                  filteredOut: keywordFiltered,
+                }
+              ).catch(() => undefined);
+              console.log(`[run] parse_fail url=${cand.url} keyword=${keyword}`);
+              continue;
+            }
 
             // Keyword relevance check (defensive).
             const normalizedForKeywordCheck = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
@@ -1722,6 +2038,8 @@ async function run(jobId: string) {
               console.log(
                 `[filter] drop keyword_miss kw=${cand.queryKeyword} url=${cand.url} title=${(parsed.title || "").slice(0, 60)}`
               );
+              keywordSkipped += 1;
+              keywordFiltered += 1;
               continue;
             }
 
@@ -1738,10 +2056,39 @@ async function run(jobId: string) {
 
             const normalizedForFilter = `${cand.subject}\n${parsed.title}\n${parsed.contentText}`;
             if (!isAllowedByWords(normalizedForFilter, includeWords, excludeWords)) {
+              keywordSkipped += 1;
+              keywordFiltered += 1;
               continue;
             }
 
             collected.push(parsed);
+            remainingForCafe -= 1;
+            cafeKeywordCollected += 1;
+            await setJobProgress(
+              jobId,
+              {
+                stage: "PARSE",
+                cafeId,
+                cafeName,
+                url: cand.url,
+                candidates: collectResult.taken,
+                parseAttempts,
+                collected: collected.length,
+                message: `keyword_saved(${keyword}) total=${collected.length}`,
+                keywordCollected: 1,
+              },
+              {
+                cafeId,
+                cafeName,
+                keyword,
+                status: "parsing",
+                searched: collectResult.fetched,
+                totalResults: collectResult.taken,
+                collected: collected.length - keywordStartCollected,
+                skipped: keywordSkipped,
+                filteredOut: keywordFiltered,
+              }
+            ).catch(() => undefined);
             sheetPending.push({
               jobId,
               sourceUrl: parsed.sourceUrl,
@@ -1761,7 +2108,61 @@ async function run(jobId: string) {
             await flushSheetRows().catch(() => undefined);
             await sleep(900 + Math.floor(Math.random() * 600));
           }
+
+          const keywordCollected = collected.length - keywordStartCollected;
+          cafeKeywordSkipped += keywordSkipped;
+          cafeKeywordFiltered += keywordFiltered;
+
+          await setJobProgress(
+            jobId,
+            {
+              stage: "SEARCH",
+              cafeId,
+              cafeName,
+              keyword,
+              keywordIndex: k + 1,
+              keywordTotal: keywords.length,
+              candidates: collectResult.taken,
+              collected: collected.length,
+              parseAttempts,
+              message:
+                `keyword_done(${keyword}) fetch=${collectResult.fetched} take=${collectResult.taken} dup_kw=${collectResult.duplicateInKeyword} dup_total=${collectResult.duplicateAcrossKeywords} skip=${keywordSkipped} filter=${keywordFiltered} save=${keywordCollected}`,
+              keywordSearched: collectResult.fetched,
+              keywordTotalResults: collectResult.taken,
+              keywordCollected,
+              keywordSkipped,
+              keywordFilteredOut: keywordFiltered,
+            },
+            {
+              cafeId,
+              cafeName,
+              keyword,
+              status: "done",
+              searched: collectResult.fetched,
+              totalResults: collectResult.taken,
+              collected: keywordCollected,
+              skipped: keywordSkipped,
+              filteredOut: keywordFiltered,
+            }
+          ).catch(() => undefined);
+          console.log(
+            `[keyword] cafe=${cafeName} keyword=${keyword} saved=${keywordCollected} skip=${keywordSkipped} filter=${keywordFiltered}`
+          );
         }
+
+        await setJobProgress(jobId, {
+          stage: "SEARCH",
+          cafeId,
+          cafeName,
+          cafeIndex: i + 1,
+          cafeTotal: cafeIds.length,
+          collected: collected.length,
+          parseAttempts,
+          message: `cafe_done(${cafeName}) save=${cafeKeywordCollected} skip=${cafeKeywordSkipped} filter=${cafeKeywordFiltered}`,
+          keywordCollected: cafeKeywordCollected,
+          keywordSkipped: cafeKeywordSkipped,
+          keywordFilteredOut: cafeKeywordFiltered,
+        }).catch(() => undefined);
       }
     }
   } finally {

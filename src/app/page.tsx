@@ -19,6 +19,7 @@ type ScrapeJob = {
   status: string;
   keywords: string;
   cafeNames: string | null;
+  cafeIds: string | null;
   minViewCount: number | null;
   minCommentCount: number | null;
   useAutoFilter: boolean;
@@ -28,6 +29,19 @@ type ScrapeJob = {
   sheetSynced: number;
   errorMessage: string | null;
   createdAt: string;
+};
+
+type JobProgressCell = {
+  cafeId?: string;
+  cafeName?: string;
+  keyword?: string;
+  status?: "queued" | "searching" | "parsing" | "done" | "failed" | "cancelled" | "skipped";
+  searched?: number;
+  totalResults?: number;
+  collected?: number;
+  skipped?: number;
+  filteredOut?: number;
+  updatedAt?: string;
 };
 
 type JobProgress = {
@@ -49,7 +63,74 @@ type JobProgress = {
   collected?: number;
   sheetSynced?: number;
   dbSynced?: number;
+  keywordMatrix?: Record<string, JobProgressCell>;
 };
+
+function makePairKey(cafeId: string, keyword: string) {
+  const a = String(cafeId || "").trim().toLowerCase();
+  const b = String(keyword || "").trim().toLowerCase();
+  return `${a}::${b}`;
+}
+
+function safeParseJsonList(input: string | null) {
+  return parseJsonList(input);
+}
+
+function buildMatrixRows(job: ScrapeJob, progress: JobProgress | null) {
+  const cafes = safeParseJsonList(job.cafeIds).map((id, idx) => {
+    const names = safeParseJsonList(job.cafeNames);
+    return { id, name: names[idx] || id };
+  });
+  const keywords = safeParseJsonList(job.keywords);
+
+  const matrixRaw = progress?.keywordMatrix;
+  const matrix: Record<string, JobProgressCell> =
+    matrixRaw && typeof matrixRaw === "object" && !Array.isArray(matrixRaw)
+      ? matrixRaw
+      : {};
+
+  let totalCollected = 0;
+  let totalSkipped = 0;
+  let totalFiltered = 0;
+  Object.values(matrix).forEach((cell) => {
+    totalCollected += Number(cell?.collected || 0);
+    totalSkipped += Number(cell?.skipped || 0);
+    totalFiltered += Number(cell?.filteredOut || 0);
+  });
+
+  const progressByCafe = cafes.map((cafe) =>
+    keywords.map((keyword) => {
+      const cell = matrix[makePairKey(cafe.id, keyword)] || null;
+      const active =
+        progress?.cafeId === cafe.id && progress?.keyword === keyword && progress?.stage !== "DONE";
+      const isDone = cell?.status === "done";
+      const isSearch = cell?.status === "searching" || cell?.status === "parsing";
+
+      return {
+        cell,
+        isDone,
+        isSearch,
+        active,
+      };
+    })
+  );
+
+  const currentCollected = Number(progress?.collected || 0);
+
+  return {
+    cafes,
+    keywords,
+    matrix: progressByCafe,
+    totalCollected,
+    totalSkipped,
+    totalFiltered,
+    totalFromJob: currentCollected,
+    currentCellActive:
+      progress?.cafeId && progress?.keyword
+        ? { cafeId: progress.cafeId, keyword: progress.keyword }
+        : null,
+  };
+}
 
 const EXCLUDE_BOARD_OPTIONS_STORAGE_KEY = "scrapeDashboardExcludeBoards:v1";
 const SESSION_PANEL_OPEN_KEY = "scrapeDashboardSessionPanelOpen:v1";

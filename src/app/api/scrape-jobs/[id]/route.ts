@@ -82,5 +82,9 @@ export async function GET(
     );
   }
 
-  return NextResponse.json({ success: true, data: job });
+  const safeJob = {
+    ...job,
+    maxPosts: Math.min(300, Math.max(1, Math.floor(Number(job.maxPosts || 0)))),
+  };
+  return NextResponse.json({ success: true, data: safeJob });
 }

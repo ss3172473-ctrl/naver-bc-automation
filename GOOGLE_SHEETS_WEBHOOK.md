@@ -9,7 +9,7 @@
 배포 URL은 매번 바뀔 수 있으므로, 실제 운영 중인 URL은 `.env`의 `GSHEET_WEBHOOK_URL`에 넣어두고 사용하세요.
 
 Create Google Apps Script and deploy as Web App.
-Use this script:
+Use this script (**posts_v2 only**; do not keep old `posts`/`comments` sheet logic):
 
 ```javascript
 function doPost(e) {
