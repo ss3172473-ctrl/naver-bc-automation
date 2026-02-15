@@ -965,58 +965,67 @@ async function fetchCandidatesFromSearchApi(
   page: Page,
   cafeNumericId: string,
   keyword: string,
-  pageNum: number
+  pageNum: number,
+  maxPages = 1
 ): Promise<ArticleCandidate[]> {
-  const url =
-    `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
-    `?cafeId=${encodeURIComponent(cafeNumericId)}` +
-    `&query=${encodeURIComponent(keyword)}` +
-    `&searchBy=1&sortBy=date&page=${pageNum}&perPage=20` +
-    `&adUnit=MW_CAFE_BOARD&ad=true`;
-
-  const resp = await page.request.get(url);
-  if (!resp.ok()) {
-    throw new Error(`Search API failed: ${resp.status()} ${url}`);
-  }
-
-  const json = await resp.json();
-  const list = json?.message?.result?.articleList || [];
-
+  const requestedPages = Math.max(1, Math.min(8, Math.floor(maxPages)));
   const rows: ArticleCandidate[] = [];
-  for (const row of list) {
-    if (row?.type !== "ARTICLE") continue;
-    const item = row.item;
-    if (!item?.articleId) continue;
 
-    // Search API subjects can contain highlight markup like <em>...</em>.
-    const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
-    const addedAtSafe = parseNaverCafeDate(item.addDate);
-    const boardName = String(
-      item.boardName ||
-        item.boardTitle ||
-        item.menuName ||
-        item.menu ||
-        item.menuTitle ||
-        item.board ||
-        ""
-    ).trim();
+  for (let targetPage = pageNum; targetPage < pageNum + requestedPages; targetPage += 1) {
+    const url =
+      `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
+      `?cafeId=${encodeURIComponent(cafeNumericId)}` +
+      `&query=${encodeURIComponent(keyword)}` +
+      `&searchBy=1&sortBy=date&page=${targetPage}&perPage=20` +
+      `&adUnit=MW_CAFE_BOARD&ad=true`;
 
-    rows.push({
-      articleId: Number(item.articleId),
-      url:
-        // PC article read URL is the most reliable for extracting 본문 text (it uses the cafe_main frame).
-        `https://cafe.naver.com/ArticleRead.nhn` +
-        `?clubid=${encodeURIComponent(cafeNumericId)}` +
-        `&articleid=${encodeURIComponent(String(item.articleId))}`,
-      subject,
-      readCount: Number(item.readCount || 0),
-      commentCount: Number(item.commentCount || 0),
-      likeCount: Number(item.likeItCount || 0),
-      boardType: String(item.boardType || "L"),
-      boardName,
-      addedAt: addedAtSafe,
-      queryKeyword: keyword,
-    });
+    const resp = await page.request.get(url);
+    if (!resp.ok()) {
+      if (targetPage === pageNum) {
+        throw new Error(`Search API failed: ${resp.status()} ${url}`);
+      }
+      break;
+    }
+
+    const json = await resp.json();
+    const list = json?.message?.result?.articleList || [];
+    if (!Array.isArray(list) || list.length === 0) break;
+
+    for (const row of list) {
+      if (row?.type !== "ARTICLE") continue;
+      const item = row.item;
+      if (!item?.articleId) continue;
+
+      // Search API subjects can contain highlight markup like <em>...</em>.
+      const subject = String(item.subject || "").replace(/<[^>]*>/g, "");
+      const addedAtSafe = parseNaverCafeDate(item.addDate);
+      const boardName = String(
+        item.boardName ||
+          item.boardTitle ||
+          item.menuName ||
+          item.menu ||
+          item.menuTitle ||
+          item.board ||
+          ""
+      ).trim();
+
+      rows.push({
+        articleId: Number(item.articleId),
+        url:
+          // PC article read URL is the most reliable for extracting 본문 text (it uses the cafe_main frame).
+          `https://cafe.naver.com/ArticleRead.nhn` +
+          `?clubid=${encodeURIComponent(cafeNumericId)}` +
+          `&articleid=${encodeURIComponent(String(item.articleId))}`,
+        subject,
+        readCount: Number(item.readCount || 0),
+        commentCount: Number(item.commentCount || 0),
+        likeCount: Number(item.likeItCount || 0),
+        boardType: String(item.boardType || "L"),
+        boardName,
+        addedAt: addedAtSafe,
+        queryKeyword: keyword,
+      });
+    }
   }
 
   return rows;
@@ -1038,10 +1047,10 @@ async function collectArticleCandidates(
   console.log(`[cafe] cafeId=${cafeId} cafeNumericId=${cafeNumericId}`);
 
   // Requirement: for each selected cafe, search each keyword at least once.
-  // To keep the Worker stable even with huge keyword lists, we only call the search API once per keyword (page=1).
-  // We still cap how many candidates we keep in memory, but we do not skip the search calls.
-  // Keep this small: parsing posts is the expensive step; too many candidates just increases timeouts.
-  const perKeywordTake = Math.min(6, Math.max(1, Math.floor(maxUrls / Math.max(1, keywords.length))));
+  // We cap per-keyword fetches by maxUrls so we can scale up without blowing up runtime.
+  // Use multiple pages only when needed to reach requested maxUrls.
+  const perKeywordTake = Math.max(1, Math.floor(maxUrls / Math.max(1, keywords.length)));
+  const pagesToFetch = Math.min(6, Math.ceil(perKeywordTake / 20));
 
   for (let i = 0; i < keywords.length; i += 1) {
     const keyword = keywords[i] || "";
@@ -1057,7 +1066,7 @@ async function collectArticleCandidates(
       message: "searching",
     }).catch(() => undefined);
     console.log(`[collect] cafe=${cafeId} keyword=${keyword}`);
-    const rows = await fetchCandidatesFromSearchApi(page, cafeNumericId, keyword, 1).catch(() => []);
+    const rows = await fetchCandidatesFromSearchApi(page, cafeNumericId, keyword, 1, pagesToFetch).catch(() => []);
     const take = Math.max(1, Math.min(perKeywordTake, rows.length));
     for (let i = 0; i < take; i += 1) {
       const row = rows[i];
