@@ -1143,6 +1143,7 @@ async function fetchCandidatesFromSearchApi(
     let responseCount = 0;
 
     for (const searchBy of searchByModes) {
+      if (mergedRows.length >= SEARCH_API_PAGE_SIZE) break;
       const url = buildCafeSearchApiUrl(cafeNumericId, keyword, targetPage, searchBy);
       const resp = await page.request.get(url);
       if (!resp.ok()) {
@@ -1155,6 +1156,7 @@ async function fetchCandidatesFromSearchApi(
       if (!Array.isArray(list) || list.length === 0) continue;
 
       for (const row of list) {
+        if (mergedRows.length >= SEARCH_API_PAGE_SIZE) break;
         if (row?.type !== "ARTICLE") continue;
         const item = row.item;
         if (!item?.articleId) continue;
@@ -1218,6 +1220,7 @@ async function fetchCandidatesFromSearchApiPage(
   let responseCount = 0;
 
   for (const searchBy of searchByModes) {
+    if (rows.length >= SEARCH_API_PAGE_SIZE) break;
     const url = buildCafeSearchApiUrl(cafeNumericId, keyword, pageNum, searchBy);
     const resp = await page.request.get(url);
     if (!resp.ok()) {
@@ -1230,6 +1233,7 @@ async function fetchCandidatesFromSearchApiPage(
     if (!Array.isArray(list) || list.length === 0) continue;
 
     for (const row of list) {
+      if (rows.length >= SEARCH_API_PAGE_SIZE) break;
       if (row?.type !== "ARTICLE") continue;
       const item = row.item;
       if (!item?.articleId) continue;
@@ -1372,9 +1376,30 @@ async function collectCandidatesForKeyword(
   let duplicateInKeyword = 0;
   const duplicateAcrossKeywords = 0;
 
+  const fetchPageRows = async (pageNo: number) => {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await fetchCandidatesFromSearchApiPage(page, cafeNumericId, keyword, pageNo);
+      } catch (error) {
+        lastError = error;
+        await sleep(250 * attempt + Math.floor(Math.random() * 200));
+      }
+    }
+    throw lastError;
+  };
+
   for (let pageNo = 1; pageNo <= hardCapPages; pageNo += 1) {
     await assertNotCancelled(jobId, `cancel requested (search page=${pageNo})`);
-    const pageRows = await fetchCandidatesFromSearchApiPage(page, cafeNumericId, keyword, pageNo).catch(() => []);
+    let pageRows: ArticleCandidate[] = [];
+    try {
+      pageRows = await fetchPageRows(pageNo);
+    } catch (error) {
+      // Treat transient API errors as a retryable failure and continue scanning later pages.
+      console.warn(`[search] page fetch failed: cafe=${cafeNumericId} keyword=${keyword} page=${pageNo}`, error);
+      await sleep(300 + Math.floor(Math.random() * 200));
+      continue;
+    }
     if (pageRows.length === 0) break;
     pagesScanned += 1;
     fetched += pageRows.length;
@@ -1405,7 +1430,8 @@ async function collectCandidatesForKeyword(
       }
     }
 
-    if (candidates.length >= effectiveTake) break;
+    // Small delay to reduce burstiness and avoid rate-limit errors.
+    await sleep(120 + Math.floor(Math.random() * 120));
     if (stopByDate) break;
     // NOTE: We query multiple `searchBy` modes and dedupe/merge results.
     // The merged row count per page can be < SEARCH_API_PAGE_SIZE even when there are more pages.

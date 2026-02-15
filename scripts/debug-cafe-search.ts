@@ -267,6 +267,7 @@ async function main() {
     const mergedRows: SearchRow[] = [];
     const existingIds = new Set<number>();
     for (const searchBy of searchByModes) {
+      if (mergedRows.length >= size) break;
       const url = normalizeUrl(pageNo, cafeId, keyword, size, searchBy);
       console.log(`page ${pageNo} request=${url}`);
 
@@ -277,6 +278,7 @@ async function main() {
       }
 
       for (const row of list) {
+        if (mergedRows.length >= size) break;
         if (row?.type !== "ARTICLE") continue;
         const item = row.item;
         if (!item?.articleId) continue;
@@ -316,11 +318,6 @@ async function main() {
     }
 
     allRows.push(...mergedRows);
-
-    if (mergedRows.length < size) {
-      console.log(`page ${pageNo} returned partial (${mergedRows.length} < ${size}), stop.`);
-      break;
-    }
   }
 
   console.log(`TOTAL ${allRows.length}`);
