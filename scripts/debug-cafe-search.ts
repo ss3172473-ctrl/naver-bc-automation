@@ -181,7 +181,7 @@ function parseInputToSearchParams(raw: string): {
 
 async function main() {
   const args = process.argv.slice(2);
-  let debugTarget: DebugTarget = { articleId: null, subject: null };
+  const debugTarget: DebugTarget = { articleId: null, subject: null };
   const positionalArgs: string[] = [];
 
   for (let i = 0; i < args.length; i += 1) {

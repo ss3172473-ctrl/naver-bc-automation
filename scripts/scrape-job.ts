@@ -1343,7 +1343,13 @@ async function collectCandidatesForKeyword(
 ): Promise<KeywordCollectResult> {
   const candidates: ArticleCandidate[] = [];
   const seen = new Set<number>();
-  const budgetPages = Math.ceil(Math.max(1, Math.min(perKeywordTake, 200)) / SEARCH_API_PAGE_SIZE);
+  // We always want enough candidates to reflect at least N pages of results (user expectation: 4 pages x 50 = 200).
+  // Parsing is still capped by the job maxPosts budget, but search should scan deep enough.
+  const effectiveTake = Math.min(
+    200,
+    Math.max(1, Math.max(perKeywordTake, SEARCH_API_PAGE_SIZE * SEARCH_API_MIN_PAGES_PER_KEYWORD))
+  );
+  const budgetPages = Math.ceil(Math.max(1, Math.min(effectiveTake, 200)) / SEARCH_API_PAGE_SIZE);
   const hardCapPages = Math.min(
     SEARCH_API_MAX_PAGES_PER_KEYWORD,
     Math.max(SEARCH_API_MIN_PAGES_PER_KEYWORD, budgetPages)
@@ -1352,8 +1358,7 @@ async function collectCandidatesForKeyword(
   let stopByDate = false;
   let excludedByBoard = 0;
   let duplicateInKeyword = 0;
-  let duplicateAcrossKeywords = 0;
-  const effectiveTake = Math.max(1, Math.min(perKeywordTake, 200));
+  const duplicateAcrossKeywords = 0;
 
   for (let pageNo = 1; pageNo <= hardCapPages; pageNo += 1) {
     await assertNotCancelled(jobId, `cancel requested (search page=${pageNo})`);
@@ -1382,10 +1387,8 @@ async function collectCandidatesForKeyword(
       }
 
       seen.add(row.articleId);
-      candidates.push(row);
-
-      if (candidates.length >= effectiveTake) {
-        break;
+      if (candidates.length < effectiveTake) {
+        candidates.push(row);
       }
     }
 
@@ -1853,24 +1856,9 @@ async function run(jobId: string) {
   await assertNotCancelled(jobId, "cancel requested before execution");
 
   const initialMatrix: KeywordProgressPatch[] = [];
-  for (const [cafeIndex, cafeId] of cafeIds.entries()) {
-    const cafeName = cafeNames[cafeIndex] || cafeId || "unknown";
-    for (const rawKeyword of keywords) {
-      const keyword = String(rawKeyword || "").trim();
-      if (!keyword) continue;
-      initialMatrix.push({
-        cafeId,
-        cafeName,
-        keyword,
-        status: "queued",
-        searched: 0,
-        totalResults: 0,
-        collected: 0,
-        skipped: 0,
-        filteredOut: 0,
-      });
-    }
-  }
+  // NOTE: Avoid pre-populating the entire keyword matrix at job start.
+  // Large (cafes x keywords) matrices can make the first progress write heavy and brittle.
+  // Cells will be created/updated as each (cafe, keyword) starts and finishes.
   await setJobProgress(
     jobId,
     {
@@ -1882,7 +1870,7 @@ async function run(jobId: string) {
       candidates: 0,
       collected: 0,
     },
-    initialMatrix
+    initialMatrix.length > 0 ? initialMatrix : null
   ).catch(() => undefined);
 
   const browser = await chromium.launch({ headless: true });

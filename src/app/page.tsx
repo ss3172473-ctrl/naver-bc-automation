@@ -29,6 +29,7 @@ type ScrapeJob = {
   sheetSynced: number;
   errorMessage: string | null;
   createdAt: string;
+  completedAt?: string | null;
 };
 
 type JobProgressCell = {
@@ -153,6 +154,7 @@ function buildMatrixRows(job: ScrapeJob, progress: JobProgress | null) {
 
 const EXCLUDE_BOARD_OPTIONS_STORAGE_KEY = "scrapeDashboardExcludeBoards:v1";
 const SESSION_PANEL_OPEN_KEY = "scrapeDashboardSessionPanelOpen:v1";
+const MATRIX_ORIENTATION_KEY = "scrapeDashboardMatrixOrientation:v1";
 const EXCLUDE_BOARD_OPTIONS_DEFAULT = [
   "도치맘 핫딜공구🔛",
   "광고",
@@ -243,47 +245,30 @@ function formatCellStatus(
   }
 ) {
   if (!cell) {
-    if (!runningContext.isRunning) {
-      return "준비";
-    }
-
-    if (runningContext.isCurrent) {
-      return "진행중";
-    }
-
-    const currentCafe = Number(runningContext.currentCafeIndex);
-    const currentKeyword = Number(runningContext.currentKeywordIndex);
-    if (Number.isFinite(currentCafe) && Number.isFinite(currentKeyword)) {
-      if (
-        runningContext.cafeIndex < currentCafe ||
-        (runningContext.cafeIndex === currentCafe && runningContext.keywordIndex <= currentKeyword)
-      ) {
-        return "완료";
-      }
-    }
+    if (runningContext.isCurrent) return "진행중";
     return "예정";
   }
 
   if (cell.status === "done") {
-    return `완료(${cell.collected ?? 0} / ${cell.skipped ?? 0})`;
+    return `✅ 완료`;
   }
   if (cell.status === "searching") {
-    return `검색중 ${cell.searched ?? 0}/${cell.totalResults ?? 0}`;
+    return `🔎 검색중`;
   }
   if (cell.status === "parsing") {
-    return `파싱중 +${cell.collected ?? 0}/${cell.searched ?? 0}`;
+    return `🧩 파싱중`;
   }
   if (cell.status === "skipped") {
-    return `제외(${cell.skipped ?? 0})`;
+    return `⛔ 제외`;
   }
   if (cell.status === "failed") {
-    return "실패";
+    return "❌ 실패";
   }
   if (cell.status === "cancelled") {
-    return "중단";
+    return "⏹ 중단";
   }
   if (cell.status === "queued") {
-    return "준비";
+    return "예정";
   }
   return "진행중";
 }
@@ -390,6 +375,34 @@ function shortenCafeName(value: string) {
   return `${name.slice(0, 15)}...`;
 }
 
+function shortenKeyword(value: string) {
+  const v = String(value || "");
+  if (v.length <= 12) return v;
+  return `${v.slice(0, 12)}...`;
+}
+
+type MatrixOrientation = "keyword_rows" | "cafe_rows";
+
+function getStoredMatrixOrientation(): MatrixOrientation | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(MATRIX_ORIENTATION_KEY);
+    if (raw === "keyword_rows" || raw === "cafe_rows") return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredMatrixOrientation(next: MatrixOrientation) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MATRIX_ORIENTATION_KEY, next);
+  } catch {
+    // ignore
+  }
+}
+
 function getStoredSessionPanelOpen() {
   if (typeof window === "undefined") return null;
   try {
@@ -472,6 +485,7 @@ export default function DashboardPage() {
   const [storageStateText, setStorageStateText] = useState("");
   const [savingSession, setSavingSession] = useState(false);
   const [isSessionOpen, setIsSessionOpen] = useState(true);
+  const [matrixOrientation, setMatrixOrientation] = useState<MatrixOrientation>("cafe_rows");
 
   const [cafes, setCafes] = useState<JoinedCafe[]>([]);
   const [cafesLoading, setCafesLoading] = useState(false);
@@ -691,6 +705,11 @@ export default function DashboardPage() {
     }
   }, []);
 
+  useEffect(() => {
+    const stored = getStoredMatrixOrientation();
+    if (stored) setMatrixOrientation(stored);
+  }, []);
+
   const saveSession = async () => {
     if (!storageStateText.trim()) {
       alert("storageState(JSON) 내용을 붙여 넣으세요.");
@@ -759,6 +778,8 @@ export default function DashboardPage() {
         return;
       }
       alert("중단 요청을 등록했습니다. Worker가 안전하게 종료합니다.");
+      fetchJobs();
+      fetchProgress(jobId);
     } finally {
       setCancellingJobId(null);
     }
@@ -912,7 +933,11 @@ export default function DashboardPage() {
   useEffect(() => {
     const trackedJobs = jobs.filter((j) => {
       const display = resolveDisplayStatus(j.status, progressByJobId[j.id] || null);
-      return display === "RUNNING" || display === "QUEUED";
+      if (display === "RUNNING" || display === "QUEUED") return true;
+      const p = progressByJobId[j.id] || null;
+      const stage = normalizeStatus(p?.stage || "");
+      if (!stage) return false;
+      return stage !== "DONE" && stage !== "FAILED" && stage !== "CANCELLED";
     });
     if (trackedJobs.length === 0) return;
 
@@ -955,6 +980,7 @@ export default function DashboardPage() {
         return;
       }
       fetchJobs();
+      fetchProgress(jobId);
       alert("작업을 시작했습니다. 서버에서 계속 진행됩니다.");
     } finally {
       setStartingJobId(null);
@@ -1087,24 +1113,25 @@ export default function DashboardPage() {
                       const isRunning = effectiveStatus === "RUNNING";
                       const action = getJobUiState(effectiveStatus, job.id);
                       const statusBadge = buildDisplayBadge(effectiveStatus, job, p);
-                      const progressText = isRunning
-                        ? [
-                            p?.stage ? `단계: ${getStageLabel(p.stage)}` : "단계: 대기",
-                            p?.cafeName ? `카페: ${p.cafeName}` : null,
-                            p?.keyword ? `키워드: ${p.keyword}` : null,
-                            p?.candidates ? `후보: ${p.candidates}` : null,
-                            p?.collected !== undefined ? `수집: ${p.collected}` : null,
-                            p?.dbSynced !== undefined ? `DB: ${p.dbSynced}` : null,
-                            p?.sheetSynced !== undefined ? `시트: ${p.sheetSynced}` : null,
-                            p?.message ? `메시지: ${p.message}` : null,
-                          ]
-                            .filter(Boolean)
-                            .join(" / ")
-                        : "큐에서 실행 대기";
+                      const progressText =
+                        effectiveStatus === "RUNNING" || (effectiveStatus === "QUEUED" && p)
+                          ? [
+                              p?.stage ? `단계: ${getStageLabel(p.stage)}` : "단계: 대기",
+                              p?.cafeName ? `카페: ${p.cafeName}` : null,
+                              p?.keyword ? `키워드: ${p.keyword}` : null,
+                              p?.candidates ? `후보: ${p.candidates}` : null,
+                              p?.collected !== undefined ? `수집: ${p.collected}` : null,
+                              p?.dbSynced !== undefined ? `DB: ${p.dbSynced}` : null,
+                              p?.sheetSynced !== undefined ? `시트: ${p.sheetSynced}` : null,
+                              p?.message ? `메시지: ${p.message}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" / ")
+                          : "큐에서 실행 대기";
                       const percent = isRunning ? getProgressPercent(p?.stage) : 15;
                       const updatedAt = p?.updatedAt ? formatAgo(p.updatedAt) : "업데이트 없음";
-                      const stepIndex = isRunning ? getPipelineIndex(p?.stage) : 1;
-                          const matrixData = isRunning ? buildMatrixRows(job, p) : null;
+                      const stepIndex = (effectiveStatus === "RUNNING" && p) ? getPipelineIndex(p?.stage) : 1;
+                      const matrixData = buildMatrixRows(job, p);
                           const hasMatrixGrid = !!(matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0);
                           const matrixText = hasMatrixGrid
                             ? `총수집 ${matrixData.totalCollected} / 스킵 ${matrixData.totalSkipped} / 필터 ${matrixData.totalFiltered}`
@@ -1163,66 +1190,142 @@ export default function DashboardPage() {
                               );
                             })}
                           </div>
-                          {isRunning && matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0 ? (
+                          {matrixData && matrixData.keywords.length > 0 && matrixData.cafes.length > 0 ? (
                             <div className="mt-3 overflow-x-auto">
-                              <div className="text-xs text-slate-600 mb-1">카페 x 키워드 진행표</div>
-                              <table className="w-full text-xs">
-                                <thead>
-                                  <tr className="text-left border-b border-slate-200">
-                                    <th className="pr-2 py-1">키워드 / 카페</th>
-                                    {matrixData.cafes.map((cafe) => (
-                                      <th
-                                        key={`${job.id}-${cafe.id}`}
-                                        className="pr-2 py-1 whitespace-nowrap"
-                                        title={cafe.name}
-                                      >
-                                        {shortenCafeName(cafe.name)}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {matrixData.keywords.map((keyword, keywordIndex) => {
-                                    return (
-                                      <tr key={`${job.id}-${keyword}`} className="border-b border-slate-100">
-                                        <td className="font-semibold pr-2 py-1">{keyword}</td>
-                                        {matrixData.cafes.map((cafe, cafeIndex) => {
-                                          const entry = matrixData.matrix[cafeIndex]?.[keywordIndex] || null;
-                                          const isActive =
-                                            matrixData.currentCellActive?.cafeId === cafe.id &&
-                                            matrixData.currentCellActive.keyword === keyword;
+                              <div className="flex items-center justify-between text-xs text-slate-600 mb-1">
+                                <span>카페 x 키워드 진행표</span>
+                                <button
+                                  className="px-2 py-1 rounded bg-slate-100 text-slate-700 hover:bg-slate-200"
+                                  onClick={() => {
+                                    const next: MatrixOrientation =
+                                      matrixOrientation === "keyword_rows" ? "cafe_rows" : "keyword_rows";
+                                    setMatrixOrientation(next);
+                                    setStoredMatrixOrientation(next);
+                                  }}
+                                >
+                                  표 방향: {matrixOrientation === "keyword_rows" ? "키워드 행" : "카페 행"}
+                                </button>
+                              </div>
+
+                              {matrixOrientation === "keyword_rows" ? (
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="text-left border-b border-slate-200">
+                                      <th className="pr-2 py-1">키워드 / 카페</th>
+                                      {matrixData.cafes.map((cafe) => (
+                                        <th
+                                          key={`${job.id}-${cafe.id}`}
+                                          className="pr-2 py-1 whitespace-nowrap"
+                                          title={cafe.name}
+                                        >
+                                          {shortenCafeName(cafe.name)}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {matrixData.keywords.map((keyword, keywordIndex) => {
+                                      return (
+                                        <tr key={`${job.id}-${keyword}`} className="border-b border-slate-100">
+                                          <td className="font-semibold pr-2 py-1">{keyword}</td>
+                                          {matrixData.cafes.map((cafe, cafeIndex) => {
+                                            const entry = matrixData.matrix[cafeIndex]?.[keywordIndex] || null;
+                                            const isActive =
+                                              matrixData.currentCellActive?.cafeId === cafe.id &&
+                                              matrixData.currentCellActive.keyword === keyword;
                                             const runningContext = {
                                               isRunning: true,
                                               isCurrent: isActive,
                                               cafeIndex,
                                               keywordIndex,
-                                              currentCafeIndex:
-                                                matrixData.currentCafeIndex,
-                                              currentKeywordIndex:
-                                                matrixData.currentKeywordIndex,
+                                              currentCafeIndex: matrixData.currentCafeIndex,
+                                              currentKeywordIndex: matrixData.currentKeywordIndex,
                                             };
-                                          return (
-                                            <td
-                                              key={`${job.id}-${keyword}-${cafe.id}`}
-                                              className={`px-2 py-1 whitespace-nowrap ${
-                                                isActive ? "bg-blue-50 rounded" : ""
-                                              }`}
-                                            >
-                                              <div className="space-y-0.5">
-                                                <span>{formatCellStatus(entry.cell, runningContext)}</span>
-                                                <span className="text-[11px] text-slate-500">
-                                                  {entry.cell?.filteredOut ? `필터 ${entry.cell.filteredOut} / ` : ""}
-                                                  {entry.cell?.collected !== undefined ? `수집 ${entry.cell.collected}` : ""}
-                                                </span>
-                                              </div>
-                                            </td>
-                                          );
-                                        })}
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
+                                            const c = Number(entry?.cell?.collected ?? 0);
+                                            const s = Number(entry?.cell?.skipped ?? 0);
+                                            const f = Number(entry?.cell?.filteredOut ?? 0);
+                                            return (
+                                              <td
+                                                key={`${job.id}-${keyword}-${cafe.id}`}
+                                                className={`px-2 py-1 whitespace-nowrap ${
+                                                  isActive ? "bg-blue-50 rounded" : ""
+                                                }`}
+                                              >
+                                                <div className="space-y-0.5">
+                                                  <span>{formatCellStatus(entry?.cell ?? null, runningContext)}</span>
+                                                  <span className="text-[11px] text-slate-500">
+                                                    수집 {c} / 스킵 {s} / 필터 {f}
+                                                  </span>
+                                                </div>
+                                              </td>
+                                            );
+                                          })}
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="text-left border-b border-slate-200">
+                                      <th className="pr-2 py-1">카페 / 키워드</th>
+                                      {matrixData.keywords.map((keyword) => (
+                                        <th
+                                          key={`${job.id}-kw-${keyword}`}
+                                          className="pr-2 py-1 whitespace-nowrap"
+                                          title={keyword}
+                                        >
+                                          {shortenKeyword(keyword)}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {matrixData.cafes.map((cafe, cafeIndex) => {
+                                      return (
+                                        <tr key={`${job.id}-cafe-${cafe.id}`} className="border-b border-slate-100">
+                                          <td className="font-semibold pr-2 py-1" title={cafe.name}>
+                                            {shortenCafeName(cafe.name)}
+                                          </td>
+                                          {matrixData.keywords.map((keyword, keywordIndex) => {
+                                            const entry = matrixData.matrix[cafeIndex]?.[keywordIndex] || null;
+                                            const isActive =
+                                              matrixData.currentCellActive?.cafeId === cafe.id &&
+                                              matrixData.currentCellActive.keyword === keyword;
+                                            const runningContext = {
+                                              isRunning: true,
+                                              isCurrent: isActive,
+                                              cafeIndex,
+                                              keywordIndex,
+                                              currentCafeIndex: matrixData.currentCafeIndex,
+                                              currentKeywordIndex: matrixData.currentKeywordIndex,
+                                            };
+                                            const c = Number(entry?.cell?.collected ?? 0);
+                                            const s = Number(entry?.cell?.skipped ?? 0);
+                                            const f = Number(entry?.cell?.filteredOut ?? 0);
+                                            return (
+                                              <td
+                                                key={`${job.id}-cell-${cafe.id}-${keyword}`}
+                                                className={`px-2 py-1 whitespace-nowrap ${
+                                                  isActive ? "bg-blue-50 rounded" : ""
+                                                }`}
+                                              >
+                                                <div className="space-y-0.5">
+                                                  <span>{formatCellStatus(entry?.cell ?? null, runningContext)}</span>
+                                                  <span className="text-[11px] text-slate-500">
+                                                    {c}/{s}/{f}
+                                                  </span>
+                                                </div>
+                                              </td>
+                                            );
+                                          })}
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              )}
                             </div>
                           ) : null}
                           <div className="mt-2">
