@@ -45,6 +45,8 @@ Use Apps Script Web App endpoint as `GSHEET_WEBHOOK_URL`.
 Payload sent by worker:
 - `postRowsV2`: post-level rows (single-sheet format)
 
+운영 점검은 [OPERATION_CHECKLIST.md](./OPERATION_CHECKLIST.md)를 기준으로 진행하세요.
+
 ## Telegram (optional)
 - Webhook endpoint: `/api/telegram/webhook`
 - Example commands:
