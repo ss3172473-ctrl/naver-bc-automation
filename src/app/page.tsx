@@ -98,11 +98,21 @@ function buildMatrixRows(job: ScrapeJob, progress: JobProgress | null) {
     totalFiltered += Number(cell?.filteredOut || 0);
   });
 
+  const progressCafeIndex = Number(progress?.cafeIndex) || 0;
+  const progressKeywordIndex = Number(progress?.keywordIndex) || 0;
+
+  const resolvedCafeId = (progress?.cafeId && String(progress.cafeId).trim()) ||
+    (progressCafeIndex >= 1 && progressCafeIndex <= cafes.length ? cafes[progressCafeIndex - 1]?.id : "");
+  const resolvedKeyword = (progress?.keyword && String(progress.keyword).trim()) ||
+    (progressKeywordIndex >= 1 && progressKeywordIndex <= keywords.length ? keywords[progressKeywordIndex - 1] : keywords[0] || "");
+
   const progressByCafe = cafes.map((cafe) =>
     keywords.map((keyword) => {
       const cell = matrix[makePairKey(cafe.id, keyword)] || null;
       const active =
-        progress?.cafeId === cafe.id && progress?.keyword === keyword && progress?.stage !== "DONE";
+        resolvedCafeId === cafe.id &&
+        resolvedKeyword === keyword &&
+        progress?.stage !== "DONE";
       const isDone = cell?.status === "done";
       const isSearch = cell?.status === "searching" || cell?.status === "parsing";
 
@@ -127,9 +137,17 @@ function buildMatrixRows(job: ScrapeJob, progress: JobProgress | null) {
     totalFiltered,
     totalFromJob: currentCollected,
     currentCellActive:
-      progress?.cafeId && progress?.keyword
-        ? { cafeId: progress.cafeId, keyword: progress.keyword }
+      resolvedCafeId && resolvedKeyword
+        ? { cafeId: resolvedCafeId, keyword: resolvedKeyword }
         : null,
+    currentCafeIndex:
+      progressCafeIndex >= 1 && progressCafeIndex <= cafes.length
+        ? progressCafeIndex - 1
+        : undefined,
+    currentKeywordIndex:
+      progressKeywordIndex >= 1 && progressKeywordIndex <= keywords.length
+        ? progressKeywordIndex - 1
+        : undefined,
   };
 }
 
@@ -1173,22 +1191,16 @@ export default function DashboardPage() {
                                           const isActive =
                                             matrixData.currentCellActive?.cafeId === cafe.id &&
                                             matrixData.currentCellActive.keyword === keyword;
-                                          const runningContext = {
-                                            isRunning: true,
-                                            isCurrent: isActive,
-                                            cafeIndex,
-                                            keywordIndex,
-                                            currentCafeIndex: matrixData.currentCellActive
-                                              ? (p?.cafeIndex
-                                                  ? Number(p.cafeIndex) - 1
-                                                  : undefined)
-                                              : undefined,
-                                            currentKeywordIndex: matrixData.currentCellActive
-                                              ? (p?.keywordIndex
-                                                  ? Number(p.keywordIndex) - 1
-                                                  : undefined)
-                                              : undefined,
-                                          };
+                                            const runningContext = {
+                                              isRunning: true,
+                                              isCurrent: isActive,
+                                              cafeIndex,
+                                              keywordIndex,
+                                              currentCafeIndex:
+                                                matrixData.currentCafeIndex,
+                                              currentKeywordIndex:
+                                                matrixData.currentKeywordIndex,
+                                            };
                                           return (
                                             <td
                                               key={`${job.id}-${keyword}-${cafe.id}`}

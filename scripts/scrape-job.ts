@@ -68,6 +68,9 @@ const OUTPUT_DIR = path.join(process.cwd(), "outputs", "scrape-jobs");
 const STORAGE_STATE_KEY = "naverCafeStorageStateEnc";
 const PROGRESS_KEY_PREFIX = "scrapeJobProgress:";
 const CANCEL_KEY_PREFIX = "scrapeJobCancel:";
+const SEARCH_API_PAGE_SIZE = 50;
+const SEARCH_API_MIN_PAGES_PER_KEYWORD = 4;
+const SEARCH_API_MAX_PAGES_PER_KEYWORD = 4;
 
 type StorageStateObject = { cookies: any[]; origins: any[] };
 
@@ -1109,7 +1112,7 @@ async function fetchCandidatesFromSearchApi(
       `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
       `?cafeId=${encodeURIComponent(cafeNumericId)}` +
       `&query=${encodeURIComponent(keyword)}` +
-      `&searchBy=1&sortBy=date&page=${targetPage}&perPage=20` +
+      `&searchBy=1&sortBy=date&page=${targetPage}&perPage=${SEARCH_API_PAGE_SIZE}` +
       `&adUnit=MW_CAFE_BOARD&ad=true`;
 
     const resp = await page.request.get(url);
@@ -1176,7 +1179,7 @@ async function fetchCandidatesFromSearchApiPage(
     `https://apis.naver.com/cafe-web/cafe-mobile/CafeMobileWebArticleSearchListV4` +
     `?cafeId=${encodeURIComponent(cafeNumericId)}` +
     `&query=${encodeURIComponent(keyword)}` +
-    `&searchBy=1&sortBy=date&page=${pageNum}&perPage=20` +
+    `&searchBy=1&sortBy=date&page=${pageNum}&perPage=${SEARCH_API_PAGE_SIZE}` +
     `&adUnit=MW_CAFE_BOARD&ad=true`;
 
   const resp = await page.request.get(url);
@@ -1302,8 +1305,11 @@ async function collectCandidatesForKeyword(
 ): Promise<KeywordCollectResult> {
   const candidates: ArticleCandidate[] = [];
   const seen = new Set<number>();
-  const budgetPages = Math.ceil(Math.max(1, Math.min(perKeywordTake, 200)) / 20);
-  const hardCapPages = Math.min(12, Math.max(3, budgetPages));
+  const budgetPages = Math.ceil(Math.max(1, Math.min(perKeywordTake, 200)) / SEARCH_API_PAGE_SIZE);
+  const hardCapPages = Math.min(
+    SEARCH_API_MAX_PAGES_PER_KEYWORD,
+    Math.max(SEARCH_API_MIN_PAGES_PER_KEYWORD, budgetPages)
+  );
   let fetched = 0;
   let stopByDate = false;
   let excludedByBoard = 0;
@@ -1347,7 +1353,7 @@ async function collectCandidatesForKeyword(
 
     if (candidates.length >= effectiveTake) break;
     if (stopByDate) break;
-    if (pageRows.length < 20) break;
+    if (pageRows.length < SEARCH_API_PAGE_SIZE) break;
   }
 
   const take = candidates.length;
