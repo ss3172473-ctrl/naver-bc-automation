@@ -42,6 +42,9 @@ function doPost(e) {
 }
 ```
 
+또는 저장된 템플릿 파일:
+`scripts/google-sheets-posts-v2-webhook.gs`
+
 Deploy settings:
 - Execute as: Me
 - Who has access: Anyone with link (or restricted with verification layer)
