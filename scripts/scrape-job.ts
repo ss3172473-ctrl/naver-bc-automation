@@ -708,6 +708,28 @@ function buildMobileFeArticleUrl(clubid: string, articleid: string): string {
   );
 }
 
+async function buildClubIdToCafeMetaMap(
+  page: Page
+): Promise<Map<string, { cafeId: string; cafeName: string; cafeUrl: string }>> {
+  const rows = await prisma.cafeMembership.findMany({ select: { cafeId: true, name: true, url: true } });
+  const map = new Map<string, { cafeId: string; cafeName: string; cafeUrl: string }>();
+  for (const row of rows) {
+    const cafeId = String(row.cafeId || "").trim();
+    if (!cafeId) continue;
+    let clubid = cafeId;
+    if (!/^\d+$/.test(cafeId)) {
+      clubid = await getClubId(page, cafeId).catch(() => "");
+    }
+    if (!clubid || !/^\d+$/.test(clubid)) continue;
+    map.set(clubid, {
+      cafeId,
+      cafeName: String(row.name || cafeId),
+      cafeUrl: String(row.url || getCafeUrl(cafeId)),
+    });
+  }
+  return map;
+}
+
 async function getClubId(page: Page, cafeId: string): Promise<string> {
   // If the "cafeId" is already numeric, treat it as clubId.
   if (/^\d+$/.test(cafeId)) {
@@ -1130,15 +1152,14 @@ async function run(jobId: string) {
   try {
     if (Array.isArray(directUrls) && directUrls.length > 0) {
       console.log(`[run] directUrls mode urls=${directUrls.length}`);
+      const metaMap = await buildClubIdToCafeMetaMap(page).catch(() => new Map());
       for (const url of directUrls) {
         if (collected.length >= job.maxPosts) break;
         const clubid = getClubIdFromUrl(url) || "";
-        const membership = clubid
-          ? await prisma.cafeMembership.findUnique({ where: { cafeId: clubid } }).catch(() => null)
-          : null;
-        const cafeId = clubid || "direct";
-        const cafeName = membership?.name || clubid || "direct";
-        const cafeNumericId = clubid || "direct";
+        const meta = clubid ? metaMap.get(clubid) : null;
+        const cafeId = meta?.cafeId || clubid || "direct";
+        const cafeName = meta?.cafeName || clubid || "direct";
+        const cafeNumericId = clubid || (meta ? await getClubId(page, meta.cafeId).catch(() => "") : "") || "direct";
 
         const parsed = await withTimeout(
           parsePost(page, url, cafeId, cafeNumericId, cafeName, ""),
@@ -1150,6 +1171,8 @@ async function run(jobId: string) {
         if (!isAllowedByWords(normalizedForFilter, includeWords, excludeWords)) {
           continue;
         }
+        // Ensure cafeUrl matches the resolved cafe (for Sheets convenience).
+        if (clubid && meta?.cafeUrl) parsed.cafeUrl = meta.cafeUrl;
         collected.push(parsed);
         await sleep(900 + Math.floor(Math.random() * 600));
       }
