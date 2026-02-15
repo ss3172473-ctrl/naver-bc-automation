@@ -70,18 +70,92 @@ function normalizeUrl(pageNo: number, cafeId: string, keyword: string, size: num
   ].join("");
 }
 
-async function main() {
-  const [cafeIdArg, keywordArg, pagesArg, sizeArg] = process.argv.slice(2);
-  if (!cafeIdArg || !keywordArg) {
+function parseInputToSearchParams(raw: string): { cafeId: string; keyword: string; pages: number; size: number } {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) {
+    throw new Error("검색 파라미터가 비어있습니다.");
+  }
+
+  if (!/^https?:\/\//i.test(trimmed) && /^[0-9]+$/.test(trimmed)) {
+    return {
+      cafeId: trimmed,
+      keyword: "집중",
+      pages: 4,
+      size: 50,
+    };
+  }
+
+  if (!trimmed.startsWith("http")) {
     throw new Error(
-      "usage: npx ts-node --project tsconfig.scripts.json scripts/debug-cafe-search.ts <cafeId> <keyword> [pages=4] [size=50]"
+      "사용법: scripts/debug-cafe-search.ts <cafeId> <keyword> [pages] [size] 또는 <카페검색 URL>"
     );
   }
 
-  const cafeId = String(cafeIdArg).trim();
-  const keyword = String(keywordArg).trim();
-  const pages = Math.max(1, Number(pagesArg || "4"));
-  const size = Math.max(1, Math.min(100, Number(sizeArg || "50")));
+  const url = new URL(trimmed);
+  const segs = url.pathname.split("/").filter(Boolean);
+  let cafeId = "";
+  for (let i = 0; i < segs.length; i += 1) {
+    if (/^\d+$/.test(segs[i])) {
+      if (segs[i - 1] === "cafes" || segs[i - 1] === "f-e") {
+        cafeId = segs[i];
+      }
+    }
+    if (segs[i] === "cafes" && segs[i + 1] && /^\d+$/.test(segs[i + 1])) {
+      cafeId = segs[i + 1];
+    }
+  }
+
+  const keyword = decodeURIComponent(url.searchParams.get("q") || "").trim();
+  const pageParam = Number(url.searchParams.get("page") || "1");
+  const sizeParam = Number(url.searchParams.get("size") || "50");
+
+  if (!cafeId || !keyword) {
+    throw new Error(`URL 파싱 실패: 카페ID/키워드를 찾지 못했습니다: ${trimmed}`);
+  }
+
+  return {
+    cafeId,
+    keyword,
+    pages: Number.isFinite(pageParam) && pageParam > 0 ? pageParam : 4,
+    size: Number.isFinite(sizeParam) && sizeParam > 0 ? Math.min(100, sizeParam) : 50,
+  };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (!args[0]) {
+    throw new Error(
+      "usage: npx ts-node --project tsconfig.scripts.json scripts/debug-cafe-search.ts <cafeId> <keyword> [pages=4] [size=50] 또는 <카페검색 URL>"
+    );
+  }
+
+  let cafeId = "";
+  let keyword = "";
+  let pages = 4;
+  let size = 50;
+
+  if (/^https?:\/\//i.test(args[0])) {
+    const parsed = parseInputToSearchParams(args[0]);
+    cafeId = parsed.cafeId;
+    keyword = parsed.keyword;
+    pages = parsed.pages;
+    size = parsed.size;
+  } else {
+    const [cafeIdArg, keywordArg, pagesArg, sizeArg] = args;
+    if (!cafeIdArg || !keywordArg) {
+      throw new Error(
+        "usage: npx ts-node --project tsconfig.scripts.json scripts/debug-cafe-search.ts <cafeId> <keyword> [pages=4] [size=50]"
+      );
+    }
+    cafeId = String(cafeIdArg).trim();
+    keyword = String(keywordArg).trim();
+    pages = Math.max(1, Number(pagesArg || "4"));
+    size = Math.max(1, Math.min(100, Number(sizeArg || String(size))));
+  }
+
+  if (!cafeId || !keyword) {
+    throw new Error("카페ID 또는 키워드가 비어있습니다.");
+  }
 
   const allRows: SearchRow[] = [];
 
@@ -130,7 +204,9 @@ async function main() {
 
   console.log(`TOTAL ${allRows.length}`);
   const target = allRows.find((r) =>
-    r.subject.includes("트 top반") || r.subject.includes("폴리") || r.subject.includes("매그라면")
+    r.subject.includes("트 top반") ||
+    r.subject.includes("폴리") ||
+    r.subject.includes("매그라면")
   );
 
   if (target) {
