@@ -1963,24 +1963,55 @@ async function run(jobId: string) {
 
   await assertNotCancelled(jobId, "cancel requested before execution");
 
-  const initialMatrix: KeywordProgressPatch[] = [];
-  // NOTE: Avoid pre-populating the entire keyword matrix at job start.
-  // Large (cafes x keywords) matrices can make the first progress write heavy and brittle.
-  // Cells will be created/updated as each (cafe, keyword) starts and finishes.
   // IMPORTANT: first progress write must succeed, otherwise the web UI will look "stuck".
-  await setJobProgress(
-    jobId,
-    {
-      stage: "SEARCH",
-      cafeIndex: 1,
-      cafeTotal: cafeIds.length,
-      keywordIndex: 0,
-      keywordTotal: keywords.length || 0,
-      candidates: 0,
-      collected: 0,
-    },
-    initialMatrix.length > 0 ? initialMatrix : null
-  );
+  // We write a small payload first, then (optionally) pre-populate the keyword matrix in chunks.
+  await setJobProgress(jobId, {
+    stage: "SEARCH",
+    cafeIndex: 1,
+    cafeTotal: cafeIds.length,
+    keywordIndex: 0,
+    keywordTotal: keywords.length || 0,
+    candidates: 0,
+    collected: 0,
+    message: "init",
+  });
+
+  // Pre-populate the per-(cafe, keyword) matrix with "queued" cells for *small* jobs.
+  // This eliminates "-" cells in the UI and makes `페이지 0/4` visible immediately.
+  // Typical case: the web UI creates 1 job per cafe, so this is just (1 x keywords).
+  const totalCells = Math.max(0, cafeIds.length) * Math.max(0, keywords.length);
+  if (totalCells > 0 && totalCells <= 400) {
+    const hardCapPages = SEARCH_API_MAX_PAGES_PER_KEYWORD;
+    const pairs: KeywordProgressPatch[] = [];
+    for (let ci = 0; ci < cafeIds.length; ci += 1) {
+      const cafeId = cafeIds[ci] || "";
+      if (!cafeId) continue;
+      const cafeName = cafeNames[ci] || cafeId;
+      for (const kw of keywords) {
+        if (!kw) continue;
+        pairs.push({
+          cafeId,
+          cafeName,
+          keyword: kw,
+          status: "queued",
+          pagesScanned: 0,
+          pagesTarget: hardCapPages,
+          perPage: SEARCH_API_PAGE_SIZE,
+          fetchedRows: 0,
+          searched: 0,
+          totalResults: 0,
+          collected: 0,
+          skipped: 0,
+          filteredOut: 0,
+        });
+      }
+    }
+
+    const chunkSize = 25;
+    for (let idx = 0; idx < pairs.length; idx += chunkSize) {
+      await setJobProgress(jobId, {}, pairs.slice(idx, idx + chunkSize)).catch(() => undefined);
+    }
+  }
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({

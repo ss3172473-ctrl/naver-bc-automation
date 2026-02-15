@@ -13,6 +13,24 @@ type JoinedCafe = {
   url: string;
 };
 
+type VersionInfo = {
+  sha: string | null;
+  now: string;
+  vercelUrl: string | null;
+  deploymentId: string | null;
+};
+
+type WorkerHeartbeat = {
+  at: string;
+  status: string;
+  commit: string | null;
+  branch?: string | null;
+  service?: string | null;
+  env?: string | null;
+  jobId?: string | null;
+  running?: number;
+};
+
 type ScrapeJob = {
   id: string;
   status: string;
@@ -80,6 +98,12 @@ function parseJsonList(input: string | null): string[] {
 function makePairKey(cafeId: string, keyword: string) {
   // Must match Worker keying: lowercased cafeId + keyword.
   return `${String(cafeId || "").trim().toLowerCase()}::${String(keyword || "").trim().toLowerCase()}`;
+}
+
+function shortSha(input?: string | null) {
+  const s = String(input || "").trim();
+  if (!s) return "-";
+  return s.slice(0, 7);
 }
 
 function formatAgo(iso?: string) {
@@ -316,6 +340,9 @@ export default function DashboardPage() {
   const [storageStateText, setStorageStateText] = useState("");
   const [savingSession, setSavingSession] = useState(false);
 
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
+  const [workerHeartbeat, setWorkerHeartbeat] = useState<WorkerHeartbeat | null>(null);
+
   const [cafes, setCafes] = useState<JoinedCafe[]>([]);
   const [cafesLoading, setCafesLoading] = useState(false);
   const [cafesError, setCafesError] = useState<string | null>(null);
@@ -402,6 +429,39 @@ export default function DashboardPage() {
     fetchSession();
     fetchJobs();
   }, [fetchSession, fetchJobs]);
+
+  const fetchVersion = useCallback(async () => {
+    const res = await fetch("/api/version", { cache: "no-store" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) return;
+    setVersionInfo(data.data || null);
+  }, []);
+
+  const fetchWorker = useCallback(async () => {
+    const res = await fetch("/api/worker-status", { cache: "no-store" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) return;
+    setWorkerHeartbeat(data.data || null);
+  }, []);
+
+  useEffect(() => {
+    fetchVersion();
+    fetchWorker();
+  }, [fetchVersion, fetchWorker]);
+
+  // Poll worker heartbeat so it's obvious whether Railway is alive and which commit is running.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      if (!alive) return;
+      await fetchWorker();
+    };
+    const t = setInterval(tick, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [fetchWorker]);
 
   // Poll jobs list (status/resultCount) so UI doesn't look stuck.
   useEffect(() => {
@@ -665,6 +725,10 @@ export default function DashboardPage() {
             <h1 className="text-2xl font-bold text-black">카페 아카이빙</h1>
             <p className="text-sm text-slate-700">
               선택한 카페에서 키워드를 검색하고(페이지당 50개, 4페이지), 열람 가능한 글의 본문/댓글 텍스트를 Google Sheets로 보냅니다.
+            </p>
+            <p className="text-xs text-slate-500 mt-1">
+              WEB {shortSha(versionInfo?.sha)} · WORKER {shortSha(workerHeartbeat?.commit)} ·{" "}
+              {workerHeartbeat?.at ? `worker ${formatAgo(workerHeartbeat.at)} (${workerHeartbeat.status})` : "worker 신호 없음"}
             </p>
           </div>
           <button onClick={handleLogout} className="px-4 py-2 text-sm bg-slate-900 text-white rounded-lg">

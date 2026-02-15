@@ -2,9 +2,40 @@ import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { spawn } from "child_process";
 import path from "path";
+import os from "os";
 
 const prisma = new PrismaClient();
 let lastCafeRefreshAt = 0;
+let lastHeartbeatAt = 0;
+
+const WORKER_HEARTBEAT_KEY = "workerHeartbeat:queue-worker";
+const HEARTBEAT_INTERVAL_MS = 15_000;
+
+async function heartbeat(status: string, extra: Record<string, unknown> = {}) {
+  const now = Date.now();
+  if (now - lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
+  lastHeartbeatAt = now;
+
+  const payload = {
+    at: new Date().toISOString(),
+    status,
+    ...extra,
+    pid: process.pid,
+    host: os.hostname(),
+    commit: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || null,
+    branch: process.env.RAILWAY_GIT_BRANCH || null,
+    service: process.env.RAILWAY_SERVICE_NAME || null,
+    env: process.env.RAILWAY_ENVIRONMENT_NAME || null,
+  };
+
+  await prisma.setting
+    .upsert({
+      where: { key: WORKER_HEARTBEAT_KEY },
+      create: { key: WORKER_HEARTBEAT_KEY, value: JSON.stringify(payload) },
+      update: { value: JSON.stringify(payload) },
+    })
+    .catch(() => undefined);
+}
 
 function spawnScript(scriptFile: string, args: string[] = []) {
   const scriptPath = path.join(process.cwd(), "scripts", scriptFile);
@@ -60,6 +91,8 @@ async function maybeRefreshCafes() {
 }
 
 async function tick() {
+  await heartbeat("tick").catch(() => undefined);
+
   await clearStaleRunningJobs().catch((error) => {
     console.error("[worker] clear stale jobs failed", error);
   });
@@ -69,16 +102,23 @@ async function tick() {
   });
 
   const running = await prisma.scrapeJob.count({ where: { status: "RUNNING" } });
-  if (running > 0) return;
+  if (running > 0) {
+    await heartbeat("busy", { running }).catch(() => undefined);
+    return;
+  }
 
   const nextJob = await prisma.scrapeJob.findFirst({
     where: { status: "QUEUED" },
     orderBy: { createdAt: "asc" },
   });
 
-  if (!nextJob) return;
+  if (!nextJob) {
+    await heartbeat("idle").catch(() => undefined);
+    return;
+  }
 
   if (nextJob.jobType === "REFRESH_CAFES") {
+    await heartbeat("run_refresh", { jobId: nextJob.id }).catch(() => undefined);
     const child = spawnScript("refresh-cafes.ts");
     await new Promise<void>((resolve) => {
       child.on("exit", () => resolve());
@@ -90,6 +130,7 @@ async function tick() {
     return;
   }
 
+  await heartbeat("run_scrape", { jobId: nextJob.id }).catch(() => undefined);
   const child = spawnScript("scrape-job.ts", [nextJob.id]);
 
   await new Promise<void>((resolve) => {
@@ -99,6 +140,7 @@ async function tick() {
 
 async function main() {
   console.log("queue worker started");
+  await heartbeat("started").catch(() => undefined);
   while (true) {
     await tick().catch((error) => {
       console.error("worker tick error", error);
