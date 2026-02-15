@@ -513,26 +513,6 @@ export default function DashboardPage() {
   const [progressByJobId, setProgressByJobId] = useState<Record<string, JobProgress | null>>({});
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
 
-  const jobStatusSummary = useMemo(() => {
-    const total = jobs.length;
-    let queue = 0;
-    let running = 0;
-    let success = 0;
-    let failed = 0;
-    let cancelled = 0;
-
-    for (const job of jobs) {
-      const p = progressByJobId[job.id] || null;
-      const display = resolveDisplayStatus(job.status, p);
-      if (display === "QUEUED") queue += 1;
-      else if (display === "RUNNING") running += 1;
-      else if (display === "SUCCESS") success += 1;
-      else if (display === "FAILED") failed += 1;
-      else if (display === "CANCELLED") cancelled += 1;
-    }
-    return { total, queue, running, success, failed, cancelled };
-  }, [jobs, progressByJobId]);
-
   const activeJobs = useMemo(() => {
     return jobs.filter((job) => {
       const p = progressByJobId[job.id] || null;
@@ -1128,56 +1108,14 @@ export default function DashboardPage() {
           </button>
         </header>
 
-        <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
-          <h2 className="text-lg font-semibold text-black">작업 처리 파이프라인</h2>
-          <p className="text-sm text-slate-600">
-            Next.js(App Router) 웹에서 작업 등록/조회, 별도 Node Worker에서 큐 실행, Playwright로 크롤링한 뒤 Prisma + Google Sheets로 저장합니다.
-          </p>
-          <ol className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 text-sm">
-            {PIPELINE_STEPS.map((label, index) => (
-              <li key={label} className="border border-slate-200 rounded-lg p-2 text-slate-700 bg-slate-50">
-                {index + 1}. {label}
-              </li>
-            ))}
-          </ol>
-        </section>
-
         <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-          <h2 className="text-lg font-semibold text-black">현재 진행 상태</h2>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-            <div className="border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-600">전체</p>
-              <p className="text-xl font-bold text-black">{jobStatusSummary.total}</p>
-            </div>
-            <div className="border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-600">대기</p>
-              <p className="text-xl font-bold text-black">{jobStatusSummary.queue}</p>
-            </div>
-            <div className="border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-600">실행</p>
-              <p className="text-xl font-bold text-black">{jobStatusSummary.running}</p>
-            </div>
-            <div className="border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-600">성공</p>
-              <p className="text-xl font-bold text-black">{jobStatusSummary.success}</p>
-            </div>
-            <div className="border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-600">실패</p>
-              <p className="text-xl font-bold text-black">{jobStatusSummary.failed}</p>
-            </div>
-            <div className="border border-slate-200 rounded-xl p-3">
-              <p className="text-xs text-slate-600">중단</p>
-              <p className="text-xl font-bold text-black">{jobStatusSummary.cancelled}</p>
-            </div>
-          </div>
-
+          <h2 className="text-lg font-semibold text-black">실행/대기 중 작업</h2>
+          <div className="space-y-3">
+            {activeJobs.length === 0 ? (
+              <p className="text-sm text-slate-600">현재 실행/대기 중인 작업이 없습니다.</p>
+            ) : (
               <div className="space-y-3">
-                <p className="text-sm font-semibold text-black">실행/대기 중 작업</p>
-                {activeJobs.length === 0 ? (
-                  <p className="text-sm text-slate-600">현재 실행/대기 중인 작업이 없습니다.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {activeJobs.map((job) => {
+                {activeJobs.map((job) => {
                       const p = progressByJobId[job.id] || null;
                       const effectiveStatus = resolveDisplayStatus(job.status, p);
                       const isRunning = effectiveStatus === "RUNNING";
@@ -1410,10 +1348,10 @@ export default function DashboardPage() {
                           </div>
                         </div>
                       );
-                    })}
-                  </div>
-                )}
+                })}
               </div>
+            )}
+          </div>
         </section>
 
         <section className="bg-white border border-slate-200 rounded-2xl p-5">
